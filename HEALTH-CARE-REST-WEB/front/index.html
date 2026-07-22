@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Health Care</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <script defer src="/js/api.js"></script>
+  <script defer src="/js/index.js"></script>
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="brand-panel">
+      <p class="eyebrow">HEALTH CARE</p>
+      <h1>매일의 건강 기록을<br>간단하고 안전하게.</h1>
+      <p class="muted">
+        키, 몸무게, 혈압, 혈당을 날짜별로 기록하고 관리자 화면에서 사용자별 기록을 확인합니다.
+      </p>
+      <div class="brand-note">
+        <strong>측정값 검증</strong>
+        <span>전날 대비 키 3cm 이상, 몸무게 5kg 이상 차이는 서버에서 차단합니다.</span>
+      </div>
+    </section>
+
+    <section class="auth-card">
+      <div class="tab-list" role="tablist">
+        <button class="tab-button active" data-tab="user-login" type="button">사용자 로그인</button>
+        <button class="tab-button" data-tab="signup" type="button">회원가입</button>
+        <button class="tab-button" data-tab="admin-login" type="button">관리자</button>
+      </div>
+
+      <div id="message" class="message hidden" role="alert"></div>
+
+      <form id="user-login-form" class="auth-form tab-panel active">
+        <h2>사용자 로그인</h2>
+        <label>
+          사용자 ID
+          <input name="account_id" autocomplete="username" required>
+        </label>
+        <label>
+          비밀번호
+          <input name="pw" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="primary-button" type="submit">로그인</button>
+      </form>
+
+      <form id="signup-form" class="auth-form tab-panel">
+        <h2>회원가입</h2>
+        <label>
+          사용자 ID
+          <input name="user_id" autocomplete="username" required>
+        </label>
+        <label>
+          비밀번호
+          <input name="pw" type="password" minlength="4" autocomplete="new-password" required>
+        </label>
+        <label>
+          비밀번호 확인
+          <input name="pw_confirm" type="password" minlength="4" autocomplete="new-password" required>
+        </label>
+        <label>
+          이름
+          <input name="name" required>
+        </label>
+        <label>
+          생년월일
+          <input name="birth" type="date" required>
+        </label>
+        <button class="primary-button" type="submit">가입하기</button>
+      </form>
+
+      <form id="admin-login-form" class="auth-form tab-panel">
+        <h2>관리자 로그인</h2>
+        <label>
+          관리자 ID
+          <input name="account_id" autocomplete="username" value="admin" required>
+        </label>
+        <label>
+          비밀번호
+          <input name="pw" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="primary-button" type="submit">관리자 로그인</button>
+        <p class="form-help">기본 계정: admin / admin</p>
+      </form>
+    </section>
+  </main>
+</body>
+</html>
