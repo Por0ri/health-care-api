@@ -124,3 +124,46 @@
   }
 }
 ```
+
+
+## 건강 수치 계산 결과
+
+측정 정보 응답에는 다음 계산 필드가 포함됩니다.
+
+```json
+{
+  "bmi": 31.1,
+  "bmi_category": "비만",
+  "bmi_status": "red",
+  "blood_pressure_category": "고혈압",
+  "blood_pressure_status": "red",
+  "fasting_glucose_category": "당뇨 의심",
+  "fasting_glucose_status": "red",
+  "overall_category": "위험",
+  "overall_status": "red",
+  "warning_message": "BMI가 비만 범위입니다.\n혈압이 고혈압 범위입니다.\n공복 혈당이 당뇨 의심 범위입니다.",
+  "warnings": [
+    "BMI가 비만 범위입니다.",
+    "혈압이 고혈압 범위입니다.",
+    "공복 혈당이 당뇨 의심 범위입니다."
+  ]
+}
+```
+
+상태 색상 키:
+
+```text
+yellow  노란색
+green   초록색
+orange  주황색
+red     빨간색
+neutral 해당 없음
+```
+
+### POST /api/measurements 처리 순서
+
+1. 입력값 검증
+2. 전날 키·몸무게 변화량 검증
+3. BMI·혈압·공복 혈당 계산 및 분류
+4. 계산 결과와 원본 측정값을 함께 SQLite에 저장
+5. 위험 항목이 있으면 `warnings` 배열로 반환

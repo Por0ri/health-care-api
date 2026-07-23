@@ -163,104 +163,59 @@ function getMeasurementRowClass(measurement) {
   return `measurement-row measurement-row-${status}`;
 }
 
+function renderDetailStatusCard(label, value, category, status) {
+  const safeStatus = normalizeStatus(status);
+  return `
+    <section class="detail-status-card detail-status-${safeStatus}">
+      <span class="detail-status-label">${escapeHtml(label)}</span>
+      <strong class="detail-status-value">${escapeHtml(value ?? "해당 없음")}</strong>
+      <span class="detail-status-category">${escapeHtml(category || "해당 없음")}</span>
+    </section>
+  `;
+}
+
 function formatMeasurementDetail(measurement) {
-  const bmiValue = renderMeasurementValue(measurement.bmi, "", 1);
   const pressureValue = (
-    measurement.systolic !== null &&
-    measurement.systolic !== undefined &&
-    measurement.diastolic !== null &&
-    measurement.diastolic !== undefined
-  )
-    ? `${escapeHtml(measurement.systolic)}/${escapeHtml(measurement.diastolic)} mmHg`
-    : "해당 없음";
+    measurement.systolic !== null && measurement.systolic !== undefined &&
+    measurement.diastolic !== null && measurement.diastolic !== undefined
+  ) ? `${measurement.systolic}/${measurement.diastolic} mmHg` : "해당 없음";
 
-  const glucoseValue = renderMeasurementValue(
-    measurement.blood_sugar,
-    " mg/dL",
-    1
-  );
-
-  const entries = [
-    {
-      term: "측정 ID",
-      value: escapeHtml(measurement.id)
-    },
-    {
-      term: "사용자 ID",
-      value: escapeHtml(measurement.user_id)
-    },
-    {
-      term: "측정 날짜",
-      value: escapeHtml(measurement.date)
-    },
-    {
-      term: "키",
-      value: `${renderMeasurementValue(measurement.height, " cm", 1)}`
-    },
-    {
-      term: "몸무게",
-      value: `${renderMeasurementValue(measurement.weight, " kg", 1)}`
-    },
-    {
-      term: "BMI",
-      value:
-        `<div class="detail-result-value">` +
-        `<strong>${bmiValue}</strong>` +
-        `${renderStatusBadge(
-          measurement.bmi_category,
-          measurement.bmi_status
-        )}</div>`
-    },
-    {
-      term: "혈압",
-      value:
-        `<div class="detail-result-value">` +
-        `<strong>${pressureValue}</strong>` +
-        `${renderStatusBadge(
-          measurement.blood_pressure_category,
-          measurement.blood_pressure_status
-        )}</div>`
-    },
-    {
-      term: "공복 혈당",
-      value:
-        `<div class="detail-result-value">` +
-        `<strong>${glucoseValue}</strong>` +
-        `${renderStatusBadge(
-          measurement.fasting_glucose_category,
-          measurement.fasting_glucose_status
-        )}</div>`
-    },
-    {
-      term: "종합 결과",
-      value: renderStatusBadge(
-        measurement.overall_category,
-        measurement.overall_status
-      )
-    },
-    {
-      term: "경고",
-      value: measurement.warnings?.length
-        ? (
-          `<div class="detail-warning">` +
-          `${measurement.warnings.map(escapeHtml).join("<br>")}` +
-          `<small>분류 결과는 참고용이며 의료 진단을 대신하지 않습니다.</small>` +
-          `</div>`
-        )
-        : "해당 없음"
-    },
-    {
-      term: "메모",
-      value: escapeHtml(measurement.memo || "-")
-    }
+  const inputEntries = [
+    ["측정 날짜", measurement.date],
+    ["키", renderMeasurementValue(measurement.height, " cm", 1)],
+    ["몸무게", renderMeasurementValue(measurement.weight, " kg", 1)],
+    ["수축기 혈압", measurement.systolic ?? "해당 없음"],
+    ["이완기 혈압", measurement.diastolic ?? "해당 없음"],
+    ["공복 혈당 입력값", renderMeasurementValue(measurement.blood_sugar, " mg/dL", 1)],
+    ["메모", measurement.memo || "-"]
   ];
 
-  return entries
-    .map(
-      ({ term, value }) =>
-        `<div><dt>${escapeHtml(term)}</dt><dd>${value}</dd></div>`
-    )
-    .join("");
+  const inputHtml = inputEntries.map(([term,value]) =>
+    `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`
+  ).join("");
+
+  const warnings = measurement.warnings?.length
+    ? `<div class="detail-warning-box"><strong>경고</strong><p>${measurement.warnings.map(escapeHtml).join("<br>")}</p><small>분류 결과는 참고용이며 의료 진단을 대신하지 않습니다.</small></div>`
+    : `<div class="detail-no-warning"><strong>경고</strong><span>해당 없음</span></div>`;
+
+  return `
+    <div class="detail-section">
+      <h3>입력한 측정 수치</h3>
+      <dl class="detail-input-list">${inputHtml}</dl>
+    </div>
+    <div class="detail-section">
+      <h3>계산 및 판정 결과</h3>
+      <div class="detail-status-grid">
+        ${renderDetailStatusCard("BMI", renderMeasurementValue(measurement.bmi, "", 1), measurement.bmi_category, measurement.bmi_status)}
+        ${renderDetailStatusCard("혈압", pressureValue, measurement.blood_pressure_category, measurement.blood_pressure_status)}
+        ${renderDetailStatusCard("공복 혈당", renderMeasurementValue(measurement.blood_sugar, " mg/dL", 1), measurement.fasting_glucose_category, measurement.fasting_glucose_status)}
+      </div>
+    </div>
+    <div class="detail-overall detail-overall-${normalizeStatus(measurement.overall_status)}">
+      <span>종합 결과</span><strong>${escapeHtml(measurement.overall_category || "해당 없음")}</strong>
+    </div>
+    ${warnings}
+  `;
 }
 
 function escapeHtml(value) {

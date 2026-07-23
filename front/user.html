@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>사용자 건강 기록</title>
-  <link rel="stylesheet" href="/css/styles.css?v=2">
-  <script defer src="/js/api.js?v=2"></script>
-  <script defer src="/js/user.js?v=2"></script>
+  <link rel="stylesheet" href="/css/styles.css?v=5">
+  <script defer src="/js/api.js?v=5"></script>
+  <script defer src="/js/user.js?v=5"></script>
 </head>
 <body>
   <header class="topbar">
@@ -23,7 +23,9 @@
         <p class="eyebrow">USER DASHBOARD</p>
         <h1>내 건강 측정 기록</h1>
       </div>
-      <p>측정값 입력과 날짜별 기록 조회를 한 화면에서 관리합니다.</p>
+      <p>
+        입력값을 서버에서 계산한 뒤 BMI, 혈압, 공복 혈당 상태와 종합 위험도를 저장합니다.
+      </p>
     </section>
 
     <div id="message" class="message hidden" role="alert"></div>
@@ -59,14 +61,26 @@
             <input name="diastolic" type="number" min="1" step="1" required>
           </label>
           <label>
-            혈당
+            공복 혈당(mg/dL)
             <input name="blood_sugar" type="number" min="0" step="0.1" required>
           </label>
           <label class="full-width">
             메모
             <textarea name="memo" rows="3" placeholder="선택 입력"></textarea>
           </label>
-          <button class="primary-button full-width" type="submit">측정 정보 저장</button>
+
+          <div class="calculation-notice full-width">
+            <strong>자동 계산 기준</strong>
+            <span>
+              BMI·혈압·공복 혈당 분류를 계산한 뒤 기록을 등록합니다.
+              위험 수치가 하나라도 있으면 상세 화면에서 빨간색 경고로 표시됩니다.
+            </span>
+            <small>표시 결과는 참고용이며 의료 진단을 대신하지 않습니다.</small>
+          </div>
+
+          <button class="primary-button full-width" type="submit">
+            계산 후 측정 정보 저장
+          </button>
         </form>
       </article>
 
@@ -80,14 +94,15 @@
         </div>
 
         <div class="table-wrap">
-          <table>
+          <table class="health-result-table compact-history-table">
             <thead>
               <tr>
                 <th>날짜</th>
                 <th>키</th>
                 <th>몸무게</th>
-                <th>혈압</th>
-                <th>혈당</th>
+                <th>BMI 판정</th>
+                <th>공복 혈당 판정</th>
+                <th>혈압 판정</th>
                 <th>관리</th>
               </tr>
             </thead>

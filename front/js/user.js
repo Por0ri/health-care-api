@@ -92,72 +92,39 @@ document.addEventListener("DOMContentLoaded", () => {
 
       measurements.forEach((measurement) => {
         const row = document.createElement("tr");
-        row.className = getMeasurementRowClass(measurement);
-
+        row.className = "measurement-row";
         row.innerHTML = `
           <td>${escapeHtml(measurement.date)}</td>
-          <td>
-            <div class="combined-value">
-              <span>${renderMeasurementValue(measurement.height, " cm", 1)}</span>
-              <span>${renderMeasurementValue(measurement.weight, " kg", 1)}</span>
-            </div>
-          </td>
-          <td>
-            <div class="result-cell">
-              <strong>${renderMeasurementValue(measurement.bmi, "", 1)}</strong>
-              ${renderStatusBadge(
-                measurement.bmi_category,
-                measurement.bmi_status
-              )}
-            </div>
-          </td>
-          <td>
-            <div class="result-cell">
-              <strong>${escapeHtml(measurement.systolic)}/${escapeHtml(measurement.diastolic)}</strong>
-              ${renderStatusBadge(
-                measurement.blood_pressure_category,
-                measurement.blood_pressure_status
-              )}
-            </div>
-          </td>
-          <td>
-            <div class="result-cell">
-              <strong>${renderMeasurementValue(
-                measurement.blood_sugar,
-                "",
-                1
-              )}</strong>
-              ${renderStatusBadge(
-                measurement.fasting_glucose_category,
-                measurement.fasting_glucose_status
-              )}
-            </div>
-          </td>
-          <td>
-            ${renderStatusBadge(
-              measurement.overall_category,
-              measurement.overall_status
-            )}
-          </td>
+          <td>${renderMeasurementValue(measurement.height, " cm", 1)}</td>
+          <td>${renderMeasurementValue(measurement.weight, " kg", 1)}</td>
+          <td>${escapeHtml(
+            measurement.bmi_category || "해당 없음"
+          )}</td>
+          <td>${escapeHtml(
+            measurement.fasting_glucose_category || "해당 없음"
+          )}</td>
+          <td>${escapeHtml(
+            measurement.blood_pressure_category || "해당 없음"
+          )}</td>
           <td>
             <div class="action-buttons">
-              <button class="table-button detail-button" type="button">상세</button>
-              <button class="danger-button delete-button" type="button">삭제</button>
+              <button
+                class="table-button detail-button"
+                type="button"
+              >
+                상세
+              </button>
+              <button
+                class="danger-button delete-button"
+                type="button"
+              >
+                삭제
+              </button>
             </div>
           </td>
         `;
-
-        row
-          .querySelector(".detail-button")
-          .addEventListener("click", () => showDetail(measurement.id));
-
-        row
-          .querySelector(".delete-button")
-          .addEventListener(
-            "click",
-            () => deleteMeasurement(measurement.id, measurement.date)
-          );
-
+        row.querySelector(".detail-button").addEventListener("click", () => showDetail(measurement.id));
+        row.querySelector(".delete-button").addEventListener("click", () => deleteMeasurement(measurement.id, measurement.date));
         tableBody.appendChild(row);
       });
     } catch (error) {
