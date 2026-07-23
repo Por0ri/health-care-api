@@ -61,6 +61,14 @@ document.addEventListener("DOMContentLoaded", () => {
           <td>${escapeHtml(user.name)}</td>
           <td>${escapeHtml(user.birth)}</td>
           <td>${escapeHtml(user.measurement_count)}</td>
+          <td>
+            ${Number(user.risk_count || 0) > 0
+              ? renderStatusBadge(
+                `위험 ${user.risk_count}건`,
+                "red"
+              )
+              : renderStatusBadge("해당 없음", "neutral")}
+          </td>
           <td><button class="table-button" type="button">측정 기록</button></td>
         `;
 
@@ -103,13 +111,53 @@ document.addEventListener("DOMContentLoaded", () => {
 
       measurements.forEach((measurement) => {
         const row = document.createElement("tr");
+        row.className = getMeasurementRowClass(measurement);
 
         row.innerHTML = `
           <td>${escapeHtml(measurement.date)}</td>
-          <td>${Number(measurement.height).toFixed(1)} cm</td>
-          <td>${Number(measurement.weight).toFixed(1)} kg</td>
-          <td>${escapeHtml(measurement.systolic)}/${escapeHtml(measurement.diastolic)}</td>
-          <td>${Number(measurement.blood_sugar).toFixed(1)}</td>
+          <td>
+            <div class="combined-value">
+              <span>${renderMeasurementValue(measurement.height, " cm", 1)}</span>
+              <span>${renderMeasurementValue(measurement.weight, " kg", 1)}</span>
+            </div>
+          </td>
+          <td>
+            <div class="result-cell">
+              <strong>${renderMeasurementValue(measurement.bmi, "", 1)}</strong>
+              ${renderStatusBadge(
+                measurement.bmi_category,
+                measurement.bmi_status
+              )}
+            </div>
+          </td>
+          <td>
+            <div class="result-cell">
+              <strong>${escapeHtml(measurement.systolic)}/${escapeHtml(measurement.diastolic)}</strong>
+              ${renderStatusBadge(
+                measurement.blood_pressure_category,
+                measurement.blood_pressure_status
+              )}
+            </div>
+          </td>
+          <td>
+            <div class="result-cell">
+              <strong>${renderMeasurementValue(
+                measurement.blood_sugar,
+                "",
+                1
+              )}</strong>
+              ${renderStatusBadge(
+                measurement.fasting_glucose_category,
+                measurement.fasting_glucose_status
+              )}
+            </div>
+          </td>
+          <td>
+            ${renderStatusBadge(
+              measurement.overall_category,
+              measurement.overall_status
+            )}
+          </td>
           <td>
             <div class="action-buttons">
               <button class="table-button detail-button" type="button">상세</button>
@@ -144,7 +192,6 @@ document.addEventListener("DOMContentLoaded", () => {
       showMessage(messageElement, error.message);
     }
   }
-
 
   async function deleteMeasurement(
     measurementId,

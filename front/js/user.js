@@ -50,7 +50,25 @@ document.addEventListener("DOMContentLoaded", () => {
         })
       });
 
-      showMessage(messageElement, result.message, "success");
+      const measurement = result.data.measurement;
+      const warnings = result.data.warnings || [];
+
+      if (measurement.overall_status === "red" || warnings.length > 0) {
+        showMessage(
+          messageElement,
+          `${result.message} 경고: ${warnings.join(" ")} ` +
+          "분류 결과는 참고용이며 의료 진단을 대신하지 않습니다.",
+          "warning"
+        );
+      } else {
+        showMessage(
+          messageElement,
+          `${result.message} 종합 결과: ` +
+          `${measurement.overall_category}`,
+          "success"
+        );
+      }
+
       form.reset();
       dateInput.value = dateInput.max;
       await loadMeasurements();
@@ -65,8 +83,6 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   async function loadMeasurements() {
-    hideMessage(messageElement);
-
     try {
       const result = await apiRequest("/measurements");
       const measurements = result.data.measurements;
@@ -76,13 +92,53 @@ document.addEventListener("DOMContentLoaded", () => {
 
       measurements.forEach((measurement) => {
         const row = document.createElement("tr");
+        row.className = getMeasurementRowClass(measurement);
 
         row.innerHTML = `
           <td>${escapeHtml(measurement.date)}</td>
-          <td>${Number(measurement.height).toFixed(1)} cm</td>
-          <td>${Number(measurement.weight).toFixed(1)} kg</td>
-          <td>${escapeHtml(measurement.systolic)}/${escapeHtml(measurement.diastolic)}</td>
-          <td>${Number(measurement.blood_sugar).toFixed(1)}</td>
+          <td>
+            <div class="combined-value">
+              <span>${renderMeasurementValue(measurement.height, " cm", 1)}</span>
+              <span>${renderMeasurementValue(measurement.weight, " kg", 1)}</span>
+            </div>
+          </td>
+          <td>
+            <div class="result-cell">
+              <strong>${renderMeasurementValue(measurement.bmi, "", 1)}</strong>
+              ${renderStatusBadge(
+                measurement.bmi_category,
+                measurement.bmi_status
+              )}
+            </div>
+          </td>
+          <td>
+            <div class="result-cell">
+              <strong>${escapeHtml(measurement.systolic)}/${escapeHtml(measurement.diastolic)}</strong>
+              ${renderStatusBadge(
+                measurement.blood_pressure_category,
+                measurement.blood_pressure_status
+              )}
+            </div>
+          </td>
+          <td>
+            <div class="result-cell">
+              <strong>${renderMeasurementValue(
+                measurement.blood_sugar,
+                "",
+                1
+              )}</strong>
+              ${renderStatusBadge(
+                measurement.fasting_glucose_category,
+                measurement.fasting_glucose_status
+              )}
+            </div>
+          </td>
+          <td>
+            ${renderStatusBadge(
+              measurement.overall_category,
+              measurement.overall_status
+            )}
+          </td>
           <td>
             <div class="action-buttons">
               <button class="table-button detail-button" type="button">상세</button>
@@ -113,7 +169,6 @@ document.addEventListener("DOMContentLoaded", () => {
       showMessage(messageElement, error.message);
     }
   }
-
 
   async function deleteMeasurement(measurementId, measurementDate) {
     const confirmed = window.confirm(

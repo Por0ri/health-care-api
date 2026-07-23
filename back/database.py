@@ -14,6 +14,25 @@ DB_PATH = Path(
     os.getenv("HEALTH_DB_PATH", str(BACK_DIR / "health_measurement.db"))
 ).resolve()
 
+STATUS_NEUTRAL = "neutral"
+STATUS_YELLOW = "yellow"
+STATUS_GREEN = "green"
+STATUS_ORANGE = "orange"
+STATUS_RED = "red"
+
+DERIVED_MEASUREMENT_COLUMNS = {
+    "bmi": "REAL",
+    "bmi_category": "TEXT NOT NULL DEFAULT '해당 없음'",
+    "bmi_status": "TEXT NOT NULL DEFAULT 'neutral'",
+    "blood_pressure_category": "TEXT NOT NULL DEFAULT '해당 없음'",
+    "blood_pressure_status": "TEXT NOT NULL DEFAULT 'neutral'",
+    "fasting_glucose_category": "TEXT NOT NULL DEFAULT '해당 없음'",
+    "fasting_glucose_status": "TEXT NOT NULL DEFAULT 'neutral'",
+    "overall_category": "TEXT NOT NULL DEFAULT '해당 없음'",
+    "overall_status": "TEXT NOT NULL DEFAULT 'neutral'",
+    "warning_message": "TEXT DEFAULT NULL",
+}
+
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +77,231 @@ def verify_password(password: str, stored_value: str) -> bool:
     return hmac.compare_digest(actual_hash.hex(), expected_hash_hex)
 
 
+def _ensure_measurement_columns(conn: sqlite3.Connection) -> None:
+    existing_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(measurements)").fetchall()
+    }
+
+    for column_name, column_definition in DERIVED_MEASUREMENT_COLUMNS.items():
+        if column_name in existing_columns:
+            continue
+
+        try:
+            conn.execute(
+                f"ALTER TABLE measurements "
+                f"ADD COLUMN {column_name} {column_definition}"
+            )
+        except sqlite3.OperationalError as error:
+            # Gunicorn 워커가 동시에 초기화할 때 다른 워커가 먼저
+            # 컬럼을 추가했다면 중복 컬럼 오류만 무시한다.
+            if "duplicate column name" not in str(error).lower():
+                raise
+
+
+def _status_priority(status: str) -> int:
+    priorities = {
+        STATUS_NEUTRAL: 0,
+        STATUS_GREEN: 1,
+        STATUS_YELLOW: 2,
+        STATUS_ORANGE: 3,
+        STATUS_RED: 4,
+    }
+    return priorities.get(status, 0)
+
+
+def classify_bmi(bmi: Optional[float]) -> tuple[str, str]:
+    if bmi is None:
+        return "해당 없음", STATUS_NEUTRAL
+    if bmi < 18.5:
+        return "저체중", STATUS_YELLOW
+    if bmi < 23:
+        return "정상", STATUS_GREEN
+    if bmi < 25:
+        return "과체중", STATUS_ORANGE
+    return "비만", STATUS_RED
+
+
+def classify_blood_pressure(
+    systolic: Optional[int],
+    diastolic: Optional[int],
+) -> tuple[str, str]:
+    if systolic is None or diastolic is None:
+        return "해당 없음", STATUS_NEUTRAL
+
+    if systolic >= 140 or diastolic >= 90:
+        return "고혈압", STATUS_RED
+
+    if systolic >= 120 or diastolic >= 80:
+        return "주의", STATUS_ORANGE
+
+    if systolic < 120 and diastolic < 80:
+        return "정상", STATUS_GREEN
+
+    return "해당 없음", STATUS_NEUTRAL
+
+
+def classify_fasting_glucose(
+    blood_sugar: Optional[float],
+) -> tuple[str, str]:
+    if blood_sugar is None:
+        return "해당 없음", STATUS_NEUTRAL
+    if blood_sugar < 100:
+        return "정상", STATUS_GREEN
+    if blood_sugar <= 125:
+        return "공복혈당장애", STATUS_ORANGE
+    return "당뇨 의심", STATUS_RED
+
+
+def calculate_health_assessment(
+    height: Optional[float],
+    weight: Optional[float],
+    systolic: Optional[int],
+    diastolic: Optional[int],
+    blood_sugar: Optional[float],
+) -> dict[str, Any]:
+    bmi: Optional[float] = None
+
+    if (
+        height is not None
+        and weight is not None
+        and float(height) > 0
+        and float(weight) > 0
+    ):
+        height_meters = float(height) / 100
+        bmi = round(float(weight) / (height_meters ** 2), 1)
+
+    bmi_category, bmi_status = classify_bmi(bmi)
+    blood_pressure_category, blood_pressure_status = classify_blood_pressure(
+        int(systolic) if systolic is not None else None,
+        int(diastolic) if diastolic is not None else None,
+    )
+    fasting_glucose_category, fasting_glucose_status = (
+        classify_fasting_glucose(
+            float(blood_sugar) if blood_sugar is not None else None
+        )
+    )
+
+    statuses = [
+        bmi_status,
+        blood_pressure_status,
+        fasting_glucose_status,
+    ]
+
+    if STATUS_RED in statuses:
+        overall_category = "위험"
+        overall_status = STATUS_RED
+    elif STATUS_ORANGE in statuses:
+        overall_category = "주의"
+        overall_status = STATUS_ORANGE
+    elif STATUS_YELLOW in statuses:
+        overall_category = "관찰"
+        overall_status = STATUS_YELLOW
+    elif statuses and all(status == STATUS_GREEN for status in statuses):
+        overall_category = "정상"
+        overall_status = STATUS_GREEN
+    else:
+        overall_category = "해당 없음"
+        overall_status = STATUS_NEUTRAL
+
+    warnings: list[str] = []
+
+    if bmi_status == STATUS_RED:
+        warnings.append("BMI가 비만 범위입니다.")
+    if blood_pressure_status == STATUS_RED:
+        warnings.append("혈압이 고혈압 범위입니다.")
+    if fasting_glucose_status == STATUS_RED:
+        warnings.append("공복 혈당이 당뇨 의심 범위입니다.")
+
+    warning_message = "\n".join(warnings) if warnings else None
+
+    return {
+        "bmi": bmi,
+        "bmi_category": bmi_category,
+        "bmi_status": bmi_status,
+        "blood_pressure_category": blood_pressure_category,
+        "blood_pressure_status": blood_pressure_status,
+        "fasting_glucose_category": fasting_glucose_category,
+        "fasting_glucose_status": fasting_glucose_status,
+        "overall_category": overall_category,
+        "overall_status": overall_status,
+        "warning_message": warning_message,
+        "warnings": warnings,
+    }
+
+
+def _serialize_measurement(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    measurement = dict(row)
+    warning_message = measurement.get("warning_message")
+
+    measurement["warnings"] = (
+        [
+            line.strip()
+            for line in str(warning_message).splitlines()
+            if line.strip()
+        ]
+        if warning_message
+        else []
+    )
+
+    return measurement
+
+
+def _recalculate_existing_measurements(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            height,
+            weight,
+            systolic,
+            diastolic,
+            blood_sugar
+        FROM measurements
+        """
+    ).fetchall()
+
+    for row in rows:
+        assessment = calculate_health_assessment(
+            row["height"],
+            row["weight"],
+            row["systolic"],
+            row["diastolic"],
+            row["blood_sugar"],
+        )
+
+        conn.execute(
+            """
+            UPDATE measurements
+            SET
+                bmi = ?,
+                bmi_category = ?,
+                bmi_status = ?,
+                blood_pressure_category = ?,
+                blood_pressure_status = ?,
+                fasting_glucose_category = ?,
+                fasting_glucose_status = ?,
+                overall_category = ?,
+                overall_status = ?,
+                warning_message = ?
+            WHERE id = ?
+            """,
+            (
+                assessment["bmi"],
+                assessment["bmi_category"],
+                assessment["bmi_status"],
+                assessment["blood_pressure_category"],
+                assessment["blood_pressure_status"],
+                assessment["fasting_glucose_category"],
+                assessment["fasting_glucose_status"],
+                assessment["overall_category"],
+                assessment["overall_status"],
+                assessment["warning_message"],
+                row["id"],
+            ),
+        )
+
+
 def initialize_database() -> None:
     with get_connection() as conn:
         conn.executescript(
@@ -75,15 +319,25 @@ def initialize_database() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS measurements (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id       TEXT NOT NULL,
-                date          TEXT NOT NULL,
-                height        REAL NOT NULL CHECK (height > 0),
-                weight        REAL NOT NULL CHECK (weight > 0),
-                systolic      INTEGER NOT NULL CHECK (systolic > 0),
-                diastolic     INTEGER NOT NULL CHECK (diastolic > 0),
-                blood_sugar   REAL NOT NULL CHECK (blood_sugar >= 0),
-                memo          TEXT DEFAULT NULL,
+                id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id                    TEXT NOT NULL,
+                date                       TEXT NOT NULL,
+                height                     REAL NOT NULL CHECK (height > 0),
+                weight                     REAL NOT NULL CHECK (weight > 0),
+                systolic                   INTEGER NOT NULL CHECK (systolic > 0),
+                diastolic                  INTEGER NOT NULL CHECK (diastolic > 0),
+                blood_sugar                REAL NOT NULL CHECK (blood_sugar >= 0),
+                bmi                        REAL,
+                bmi_category               TEXT NOT NULL DEFAULT '해당 없음',
+                bmi_status                 TEXT NOT NULL DEFAULT 'neutral',
+                blood_pressure_category    TEXT NOT NULL DEFAULT '해당 없음',
+                blood_pressure_status      TEXT NOT NULL DEFAULT 'neutral',
+                fasting_glucose_category   TEXT NOT NULL DEFAULT '해당 없음',
+                fasting_glucose_status     TEXT NOT NULL DEFAULT 'neutral',
+                overall_category           TEXT NOT NULL DEFAULT '해당 없음',
+                overall_status             TEXT NOT NULL DEFAULT 'neutral',
+                warning_message            TEXT DEFAULT NULL,
+                memo                       TEXT DEFAULT NULL,
 
                 FOREIGN KEY (user_id)
                     REFERENCES users(user_id)
@@ -102,9 +356,17 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_measurements_user_date
                 ON measurements(user_id, date);
-
             CREATE INDEX IF NOT EXISTS idx_sessions_expires_at
                 ON sessions(expires_at);
+            """
+        )
+
+        _ensure_measurement_columns(conn)
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_measurements_overall_status
+            ON measurements(overall_status)
             """
         )
 
@@ -120,6 +382,8 @@ def initialize_database() -> None:
             "DELETE FROM sessions WHERE expires_at <= ?",
             (utc_now().isoformat(),),
         )
+
+        _recalculate_existing_measurements(conn)
 
 
 def parse_date(value: Any, field_name: str) -> date:
@@ -311,7 +575,7 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
     blood_sugar = require_number(
         data,
         "blood_sugar",
-        "혈당",
+        "공복 혈당",
         minimum=0,
     )
 
@@ -324,6 +588,14 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     memo = memo_value.strip() or None if isinstance(memo_value, str) else None
     previous_date = (measurement_date - timedelta(days=1)).isoformat()
+
+    assessment = calculate_health_assessment(
+        float(height),
+        float(weight),
+        int(systolic),
+        int(diastolic),
+        float(blood_sugar),
+    )
 
     with get_connection() as conn:
         duplicate = conn.execute(
@@ -373,9 +645,22 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
                 systolic,
                 diastolic,
                 blood_sugar,
+                bmi,
+                bmi_category,
+                bmi_status,
+                blood_pressure_category,
+                blood_pressure_status,
+                fasting_glucose_category,
+                fasting_glucose_status,
+                overall_category,
+                overall_status,
+                warning_message,
                 memo
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 user_id,
@@ -385,6 +670,16 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
                 systolic,
                 diastolic,
                 blood_sugar,
+                assessment["bmi"],
+                assessment["bmi_category"],
+                assessment["bmi_status"],
+                assessment["blood_pressure_category"],
+                assessment["blood_pressure_status"],
+                assessment["fasting_glucose_category"],
+                assessment["fasting_glucose_status"],
+                assessment["overall_category"],
+                assessment["overall_status"],
+                assessment["warning_message"],
                 memo,
             ),
         )
@@ -402,16 +697,7 @@ def list_user_measurements(user_id: str) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT
-                id,
-                user_id,
-                date,
-                height,
-                weight,
-                systolic,
-                diastolic,
-                blood_sugar,
-                memo
+            SELECT *
             FROM measurements
             WHERE user_id = ?
             ORDER BY date DESC
@@ -419,7 +705,7 @@ def list_user_measurements(user_id: str) -> list[dict[str, Any]]:
             (user_id,),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [_serialize_measurement(row) for row in rows]
 
 
 def get_measurement(measurement_id: int) -> Optional[dict[str, Any]]:
@@ -429,12 +715,10 @@ def get_measurement(measurement_id: int) -> Optional[dict[str, Any]]:
             (measurement_id,),
         ).fetchone()
 
-    return dict(row) if row is not None else None
-
+    return _serialize_measurement(row) if row is not None else None
 
 
 def delete_measurement(measurement_id: int) -> bool:
-    """측정 기록 하나를 영구 삭제하고 성공 여부를 반환한다."""
     with get_connection() as conn:
         cursor = conn.execute(
             "DELETE FROM measurements WHERE id = ?",
@@ -442,6 +726,7 @@ def delete_measurement(measurement_id: int) -> bool:
         )
 
     return cursor.rowcount == 1
+
 
 def list_users(keyword: str = "") -> list[dict[str, Any]]:
     keyword = keyword.strip()
@@ -460,7 +745,13 @@ def list_users(keyword: str = "") -> list[dict[str, Any]]:
                 u.user_id,
                 u.name,
                 u.birth,
-                COUNT(m.id) AS measurement_count
+                COUNT(m.id) AS measurement_count,
+                SUM(
+                    CASE
+                        WHEN m.overall_status = 'red' THEN 1
+                        ELSE 0
+                    END
+                ) AS risk_count
             FROM users AS u
             LEFT JOIN measurements AS m
                 ON u.user_id = m.user_id

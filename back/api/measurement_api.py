@@ -43,8 +43,11 @@ def create_measurement_resource():
     )
 
     return success_response(
-        "측정 정보가 저장되었습니다.",
-        {"measurement": measurement},
+        "건강 수치 계산 후 측정 정보가 저장되었습니다.",
+        {
+            "measurement": measurement,
+            "warnings": measurement.get("warnings", []),
+        },
         status=201,
     )
 
