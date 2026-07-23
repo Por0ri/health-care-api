@@ -804,3 +804,59 @@ td {
     grid-template-columns: 1fr;
   }
 }
+
+
+/* PUT 측정 기록 전체 수정 */
+.edit-button {
+  border: 1px solid rgba(55, 93, 160, 0.28);
+  padding: 8px 11px;
+  border-radius: 11px;
+  color: #315b9c;
+  background: #eef4ff;
+  font-weight: 700;
+}
+
+.edit-button:hover {
+  border-color: #315b9c;
+  background: #e1ecff;
+}
+
+.edit-dialog {
+  width: min(720px, calc(100% - 32px));
+}
+
+.edit-dialog .dialog-heading {
+  align-items: flex-start;
+}
+
+.edit-dialog .dialog-heading h2 {
+  margin-top: 6px;
+}
+
+.edit-help {
+  margin: -4px 0 22px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.edit-measurement-form {
+  column-gap: 20px;
+  row-gap: 18px;
+}
+
+.dialog-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+@media (max-width: 620px) {
+  .dialog-form-actions {
+    flex-direction: column-reverse;
+  }
+
+  .dialog-form-actions button {
+    width: 100%;
+  }
+}

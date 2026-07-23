@@ -31,6 +31,9 @@ def api_index():
                 "GET /api/measurements",
                 "POST /api/measurements",
                 "GET /api/measurements/{measurement_id}",
+                "PUT /api/measurements/{measurement_id}",
+                "Measurement responses include BMI and health classifications",
+                "DELETE /api/measurements/{measurement_id}",
             ]
         },
     )

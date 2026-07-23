@@ -13,10 +13,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const detailDialog = document.querySelector("#detail-dialog");
   const detailList = document.querySelector("#measurement-detail");
   const dateInput = document.querySelector("#measurement-date");
+  const editDialog = document.querySelector("#edit-dialog");
+  const editForm = document.querySelector("#edit-measurement-form");
+  const editDateInput = document.querySelector("#edit-date");
 
   accountLabel.textContent = `${session.account_id} 님`;
   dateInput.max = new Date().toISOString().slice(0, 10);
   dateInput.value = dateInput.max;
+  editDateInput.max = dateInput.max;
 
   document
     .querySelector("#logout-button")
@@ -29,6 +33,15 @@ document.addEventListener("DOMContentLoaded", () => {
   document
     .querySelector("#dialog-close-button")
     .addEventListener("click", () => detailDialog.close());
+
+
+  document
+    .querySelector("#edit-dialog-close-button")
+    .addEventListener("click", () => editDialog.close());
+
+  document
+    .querySelector("#edit-cancel-button")
+    .addEventListener("click", () => editDialog.close());
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -71,6 +84,64 @@ document.addEventListener("DOMContentLoaded", () => {
 
       form.reset();
       dateInput.value = dateInput.max;
+  editDateInput.max = dateInput.max;
+      await loadMeasurements();
+    } catch (error) {
+      if (error.status === 401) {
+        window.location.replace("/");
+        return;
+      }
+
+      showMessage(messageElement, error.message);
+    }
+  });
+
+
+  editForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    hideMessage(messageElement);
+
+    const formData = new FormData(editForm);
+    const measurementId = formData.get("measurement_id");
+
+    try {
+      const result = await apiRequest(
+        `/measurements/${measurementId}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            date: formData.get("date"),
+            height: Number(formData.get("height")),
+            weight: Number(formData.get("weight")),
+            systolic: Number(formData.get("systolic")),
+            diastolic: Number(formData.get("diastolic")),
+            blood_sugar: Number(formData.get("blood_sugar")),
+            memo: formData.get("memo")
+          })
+        }
+      );
+
+      const measurement = result.data.measurement;
+      const warnings = result.data.warnings || [];
+
+      editDialog.close();
+
+      if (measurement.overall_status === "red" || warnings.length > 0) {
+        showMessage(
+          messageElement,
+          `${result.message} 경고: ${warnings.join(" ")} ` +
+          "분류 결과는 참고용이며 의료 진단을 대신하지 않습니다.",
+          "warning"
+        );
+      } else {
+        showMessage(
+          messageElement,
+          `${result.message} 종합 결과: ` +
+          `${measurement.overall_category}`,
+          "success"
+        );
+      }
+
       await loadMeasurements();
     } catch (error) {
       if (error.status === 401) {
@@ -115,6 +186,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 상세
               </button>
               <button
+                class="edit-button update-button"
+                type="button"
+              >
+                수정
+              </button>
+              <button
                 class="danger-button delete-button"
                 type="button"
               >
@@ -123,10 +200,50 @@ document.addEventListener("DOMContentLoaded", () => {
             </div>
           </td>
         `;
-        row.querySelector(".detail-button").addEventListener("click", () => showDetail(measurement.id));
-        row.querySelector(".delete-button").addEventListener("click", () => deleteMeasurement(measurement.id, measurement.date));
+        row
+          .querySelector(".detail-button")
+          .addEventListener("click", () => showDetail(measurement.id));
+
+        row
+          .querySelector(".update-button")
+          .addEventListener("click", () => openEditDialog(measurement.id));
+
+        row
+          .querySelector(".delete-button")
+          .addEventListener(
+            "click",
+            () => deleteMeasurement(measurement.id, measurement.date)
+          );
         tableBody.appendChild(row);
       });
+    } catch (error) {
+      if (error.status === 401) {
+        window.location.replace("/");
+        return;
+      }
+
+      showMessage(messageElement, error.message);
+    }
+  }
+
+
+  async function openEditDialog(measurementId) {
+    hideMessage(messageElement);
+
+    try {
+      const result = await apiRequest(`/measurements/${measurementId}`);
+      const measurement = result.data.measurement;
+
+      document.querySelector("#edit-measurement-id").value = measurement.id;
+      document.querySelector("#edit-date").value = measurement.date;
+      document.querySelector("#edit-height").value = measurement.height;
+      document.querySelector("#edit-weight").value = measurement.weight;
+      document.querySelector("#edit-systolic").value = measurement.systolic;
+      document.querySelector("#edit-diastolic").value = measurement.diastolic;
+      document.querySelector("#edit-blood-sugar").value = measurement.blood_sugar;
+      document.querySelector("#edit-memo").value = measurement.memo || "";
+
+      editDialog.showModal();
     } catch (error) {
       if (error.status === 401) {
         window.location.replace("/");

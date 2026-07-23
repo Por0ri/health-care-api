@@ -693,6 +693,199 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return measurement
 
 
+
+def update_measurement(
+    measurement_id: int,
+    user_id: str,
+    data: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Replace one user's measurement with a complete PUT representation."""
+    measurement_date = parse_date(
+        require_text(data, "date", "측정 날짜"),
+        "측정 날짜",
+    )
+
+    if measurement_date > date.today():
+        raise ValueError("미래 날짜의 측정 정보는 입력할 수 없습니다.")
+
+    height = require_number(data, "height", "키", minimum=0.1)
+    weight = require_number(data, "weight", "몸무게", minimum=0.1)
+    systolic = require_number(
+        data,
+        "systolic",
+        "수축기 혈압",
+        integer=True,
+        minimum=1,
+    )
+    diastolic = require_number(
+        data,
+        "diastolic",
+        "이완기 혈압",
+        integer=True,
+        minimum=1,
+    )
+    blood_sugar = require_number(
+        data,
+        "blood_sugar",
+        "공복 혈당",
+        minimum=0,
+    )
+
+    if systolic <= diastolic:
+        raise ValueError("수축기 혈압은 이완기 혈압보다 커야 합니다.")
+
+    memo_value = data.get("memo")
+    if memo_value is not None and not isinstance(memo_value, str):
+        raise ValueError("메모는 문자열이어야 합니다.")
+
+    memo = memo_value.strip() or None if isinstance(memo_value, str) else None
+    previous_date = (measurement_date - timedelta(days=1)).isoformat()
+    next_date = (measurement_date + timedelta(days=1)).isoformat()
+
+    assessment = calculate_health_assessment(
+        float(height),
+        float(weight),
+        int(systolic),
+        int(diastolic),
+        float(blood_sugar),
+    )
+
+    with get_connection() as conn:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM measurements
+            WHERE id = ? AND user_id = ?
+            """,
+            (measurement_id, user_id),
+        ).fetchone()
+
+        if existing is None:
+            return None
+
+        duplicate = conn.execute(
+            """
+            SELECT 1
+            FROM measurements
+            WHERE user_id = ?
+              AND date = ?
+              AND id <> ?
+            """,
+            (
+                user_id,
+                measurement_date.isoformat(),
+                measurement_id,
+            ),
+        ).fetchone()
+
+        if duplicate:
+            raise ValueError("해당 날짜의 다른 측정 정보가 이미 존재합니다.")
+
+        previous = conn.execute(
+            """
+            SELECT height, weight
+            FROM measurements
+            WHERE user_id = ?
+              AND date = ?
+              AND id <> ?
+            """,
+            (user_id, previous_date, measurement_id),
+        ).fetchone()
+
+        if previous is not None:
+            height_difference = abs(float(height) - previous["height"])
+            weight_difference = abs(float(weight) - previous["weight"])
+
+            if height_difference >= 3:
+                raise ValueError(
+                    f"전날 키와 {height_difference:.1f}cm 차이가 납니다. "
+                    "전날 대비 3cm 이상 차이 나는 값으로 수정할 수 없습니다."
+                )
+
+            if weight_difference >= 5:
+                raise ValueError(
+                    f"전날 몸무게와 {weight_difference:.1f}kg 차이가 납니다. "
+                    "전날 대비 5kg 이상 차이 나는 값으로 수정할 수 없습니다."
+                )
+
+        following = conn.execute(
+            """
+            SELECT height, weight
+            FROM measurements
+            WHERE user_id = ?
+              AND date = ?
+              AND id <> ?
+            """,
+            (user_id, next_date, measurement_id),
+        ).fetchone()
+
+        if following is not None:
+            height_difference = abs(following["height"] - float(height))
+            weight_difference = abs(following["weight"] - float(weight))
+
+            if height_difference >= 3:
+                raise ValueError(
+                    f"다음 날 키와 {height_difference:.1f}cm 차이가 납니다. "
+                    "다음 날 기록과 3cm 이상 차이 나는 값으로 수정할 수 없습니다."
+                )
+
+            if weight_difference >= 5:
+                raise ValueError(
+                    f"다음 날 몸무게와 {weight_difference:.1f}kg 차이가 납니다. "
+                    "다음 날 기록과 5kg 이상 차이 나는 값으로 수정할 수 없습니다."
+                )
+
+        cursor = conn.execute(
+            """
+            UPDATE measurements
+            SET
+                date = ?,
+                height = ?,
+                weight = ?,
+                systolic = ?,
+                diastolic = ?,
+                blood_sugar = ?,
+                bmi = ?,
+                bmi_category = ?,
+                bmi_status = ?,
+                blood_pressure_category = ?,
+                blood_pressure_status = ?,
+                fasting_glucose_category = ?,
+                fasting_glucose_status = ?,
+                overall_category = ?,
+                overall_status = ?,
+                warning_message = ?,
+                memo = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                measurement_date.isoformat(),
+                height,
+                weight,
+                systolic,
+                diastolic,
+                blood_sugar,
+                assessment["bmi"],
+                assessment["bmi_category"],
+                assessment["bmi_status"],
+                assessment["blood_pressure_category"],
+                assessment["blood_pressure_status"],
+                assessment["fasting_glucose_category"],
+                assessment["fasting_glucose_status"],
+                assessment["overall_category"],
+                assessment["overall_status"],
+                assessment["warning_message"],
+                memo,
+                measurement_id,
+                user_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            return None
+
+    return get_measurement(measurement_id)
+
 def list_user_measurements(user_id: str) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
