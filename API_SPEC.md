@@ -201,3 +201,63 @@ neutral 해당 없음
 3. BMI·혈압·공복 혈당 계산 및 분류
 4. 계산 결과와 원본 측정값을 함께 SQLite에 저장
 5. 위험 항목이 있으면 `warnings` 배열로 반환
+
+
+## GET /api/search
+
+현재 사용자의 측정 기록을 날짜 범위로 검색하고 페이지 단위로 반환합니다.
+
+쿼리 파라미터:
+
+```text
+start_date  선택, YYYY-MM-DD
+end_date    선택, YYYY-MM-DD
+page        선택, 기본 1
+page_size   선택, 기본 5, 최대 50
+```
+
+`GET /api/measurements`에도 동일한 쿼리 파라미터를 사용할 수 있습니다.
+
+## GET /api/stats
+
+현재 사용자의 선택 기간 측정값 평균을 반환합니다.
+
+```json
+{
+  "success": true,
+  "data": {
+    "statistics": {
+      "measurement_count": 3,
+      "first_date": "2026-07-01",
+      "last_date": "2026-07-03",
+      "averages": {
+        "height": 170.0,
+        "weight": 61.2,
+        "bmi": 21.2,
+        "systolic": 118.3,
+        "diastolic": 77.7,
+        "blood_sugar": 94.0
+      }
+    }
+  }
+}
+```
+
+`GET /api/measurements/stats`도 같은 결과를 반환합니다.
+
+## 관리자 날짜 조회와 평균
+
+```http
+GET /api/users/{user_id}/measurements?start_date=&end_date=&page=&page_size=
+GET /api/users/{user_id}/measurements/stats?start_date=&end_date=
+```
+
+## 평균 자동 갱신
+
+다음 API 응답에는 해당 사용자의 최신 전체 평균인 `statistics`가 포함됩니다.
+
+```text
+POST   /api/measurements
+PUT    /api/measurements/{measurement_id}
+DELETE /api/measurements/{measurement_id}
+```

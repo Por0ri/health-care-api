@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import math
 import os
 import secrets
 import sqlite3
@@ -886,19 +887,276 @@ def update_measurement(
 
     return get_measurement(measurement_id)
 
-def list_user_measurements(user_id: str) -> list[dict[str, Any]]:
+def _normalize_optional_date(
+    value: Optional[str],
+    field_name: str,
+) -> Optional[str]:
+    if value is None:
+        return None
+
+    normalized = value.strip()
+
+    if not normalized:
+        return None
+
+    return parse_date(normalized, field_name).isoformat()
+
+
+def _normalize_date_range(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    normalized_start = _normalize_optional_date(
+        start_date,
+        "조회 시작일",
+    )
+    normalized_end = _normalize_optional_date(
+        end_date,
+        "조회 종료일",
+    )
+
+    if (
+        normalized_start is not None
+        and normalized_end is not None
+        and normalized_start > normalized_end
+    ):
+        raise ValueError("조회 시작일은 종료일보다 늦을 수 없습니다.")
+
+    return normalized_start, normalized_end
+
+
+def _normalize_pagination(
+    page: Any,
+    page_size: Any,
+) -> tuple[int, int]:
+    try:
+        normalized_page = int(page)
+        normalized_page_size = int(page_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("페이지 번호와 페이지 크기는 정수여야 합니다.") from exc
+
+    if normalized_page < 1:
+        raise ValueError("페이지 번호는 1 이상이어야 합니다.")
+
+    if normalized_page_size < 1 or normalized_page_size > 50:
+        raise ValueError("페이지 크기는 1 이상 50 이하여야 합니다.")
+
+    return normalized_page, normalized_page_size
+
+
+def _measurement_filter_sql(
+    user_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[str, list[Any]]:
+    conditions = ["user_id = ?"]
+    parameters: list[Any] = [user_id]
+
+    if start_date is not None:
+        conditions.append("date >= ?")
+        parameters.append(start_date)
+
+    if end_date is not None:
+        conditions.append("date <= ?")
+        parameters.append(end_date)
+
+    return " AND ".join(conditions), parameters
+
+
+def search_user_measurements(
+    user_id: str,
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 5,
+) -> dict[str, Any]:
+    normalized_start, normalized_end = _normalize_date_range(
+        start_date,
+        end_date,
+    )
+    normalized_page, normalized_page_size = _normalize_pagination(
+        page,
+        page_size,
+    )
+    where_sql, parameters = _measurement_filter_sql(
+        user_id,
+        normalized_start,
+        normalized_end,
+    )
+
     with get_connection() as conn:
+        count_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total_count
+            FROM measurements
+            WHERE {where_sql}
+            """,
+            parameters,
+        ).fetchone()
+
+        total_count = int(count_row["total_count"])
+        total_pages = (
+            math.ceil(total_count / normalized_page_size)
+            if total_count > 0
+            else 0
+        )
+
+        # 필터 결과가 줄어든 뒤 존재하지 않는 페이지를 요청하면
+        # 마지막 페이지로 보정한다.
+        effective_page = normalized_page
+        if total_pages > 0 and effective_page > total_pages:
+            effective_page = total_pages
+
+        offset = (effective_page - 1) * normalized_page_size
+
         rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM measurements
-            WHERE user_id = ?
-            ORDER BY date DESC
+            WHERE {where_sql}
+            ORDER BY date DESC, id DESC
+            LIMIT ? OFFSET ?
             """,
-            (user_id,),
+            [
+                *parameters,
+                normalized_page_size,
+                offset,
+            ],
         ).fetchall()
 
-    return [_serialize_measurement(row) for row in rows]
+    return {
+        "measurements": [
+            _serialize_measurement(row)
+            for row in rows
+        ],
+        "pagination": {
+            "page": effective_page,
+            "page_size": normalized_page_size,
+            "total_count": total_count,
+            "total_pages": total_pages,
+            "has_previous": effective_page > 1,
+            "has_next": total_pages > 0 and effective_page < total_pages,
+        },
+        "filters": {
+            "start_date": normalized_start,
+            "end_date": normalized_end,
+        },
+    }
+
+
+def list_user_measurements(user_id: str) -> list[dict[str, Any]]:
+    """이전 내부 호출과의 호환을 위한 전체 목록 조회 함수."""
+    result = search_user_measurements(
+        user_id,
+        page=1,
+        page_size=50,
+    )
+    measurements = list(result["measurements"])
+    total_pages = int(result["pagination"]["total_pages"])
+
+    for page_number in range(2, total_pages + 1):
+        page_result = search_user_measurements(
+            user_id,
+            page=page_number,
+            page_size=50,
+        )
+        measurements.extend(page_result["measurements"])
+
+    return measurements
+
+
+def _rounded_average(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+
+    return round(float(value), 1)
+
+
+def get_measurement_statistics(
+    user_id: str,
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict[str, Any]:
+    normalized_start, normalized_end = _normalize_date_range(
+        start_date,
+        end_date,
+    )
+    where_sql, parameters = _measurement_filter_sql(
+        user_id,
+        normalized_start,
+        normalized_end,
+    )
+
+    with get_connection() as conn:
+        row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS measurement_count,
+                MIN(date) AS first_date,
+                MAX(date) AS last_date,
+                AVG(height) AS average_height,
+                AVG(weight) AS average_weight,
+                AVG(bmi) AS average_bmi,
+                AVG(systolic) AS average_systolic,
+                AVG(diastolic) AS average_diastolic,
+                AVG(blood_sugar) AS average_blood_sugar
+            FROM measurements
+            WHERE {where_sql}
+            """,
+            parameters,
+        ).fetchone()
+
+    measurement_count = int(row["measurement_count"])
+
+    averages = {
+        "height": _rounded_average(row["average_height"]),
+        "weight": _rounded_average(row["average_weight"]),
+        "bmi": _rounded_average(row["average_bmi"]),
+        "systolic": _rounded_average(row["average_systolic"]),
+        "diastolic": _rounded_average(row["average_diastolic"]),
+        "blood_sugar": _rounded_average(row["average_blood_sugar"]),
+    }
+
+    bmi_category, bmi_status = classify_bmi(averages["bmi"])
+    pressure_category, pressure_status = classify_blood_pressure(
+        round(averages["systolic"])
+        if averages["systolic"] is not None
+        else None,
+        round(averages["diastolic"])
+        if averages["diastolic"] is not None
+        else None,
+    )
+    glucose_category, glucose_status = classify_fasting_glucose(
+        averages["blood_sugar"]
+    )
+
+    return {
+        "measurement_count": measurement_count,
+        "first_date": row["first_date"],
+        "last_date": row["last_date"],
+        "filters": {
+            "start_date": normalized_start,
+            "end_date": normalized_end,
+        },
+        "averages": averages,
+        "classifications": {
+            "bmi": {
+                "category": bmi_category,
+                "status": bmi_status,
+            },
+            "blood_pressure": {
+                "category": pressure_category,
+                "status": pressure_status,
+            },
+            "fasting_glucose": {
+                "category": glucose_category,
+                "status": glucose_status,
+            },
+        },
+    }
+
 
 
 def get_measurement(measurement_id: int) -> Optional[dict[str, Any]]:

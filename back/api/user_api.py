@@ -1,6 +1,12 @@
 from flask import Blueprint, request
 
-from database import create_user, get_user, list_user_measurements, list_users
+from database import (
+    create_user,
+    get_measurement_statistics,
+    get_user,
+    list_users,
+    search_user_measurements,
+)
 from .auth import require_role
 from .responses import error_response, success_response
 
@@ -72,10 +78,45 @@ def get_user_measurements(user_id: str):
             error_type="not_found",
         )
 
+    result = search_user_measurements(
+        user_id,
+        start_date=request.args.get("start_date"),
+        end_date=request.args.get("end_date"),
+        page=request.args.get("page", 1),
+        page_size=request.args.get("page_size", 5),
+    )
+
     return success_response(
-        "사용자의 측정 정보를 조회했습니다.",
+        "사용자의 날짜별 측정 기록을 조회했습니다.",
         {
             "user": user,
-            "measurements": list_user_measurements(user_id),
+            **result,
+        },
+    )
+
+
+@user_api.get("/api/users/<string:user_id>/measurements/stats")
+@require_role("admin")
+def get_user_measurement_statistics(user_id: str):
+    user = get_user(user_id)
+
+    if user is None:
+        return error_response(
+            "사용자를 찾을 수 없습니다.",
+            status=404,
+            error_type="not_found",
+        )
+
+    statistics = get_measurement_statistics(
+        user_id,
+        start_date=request.args.get("start_date"),
+        end_date=request.args.get("end_date"),
+    )
+
+    return success_response(
+        "사용자의 측정 기록 평균을 계산했습니다.",
+        {
+            "user": user,
+            "statistics": statistics,
         },
     )

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>관리자 사용자 조회</title>
-  <link rel="stylesheet" href="/css/styles.css?v=5">
-  <script defer src="/js/api.js?v=5"></script>
-  <script defer src="/js/admin.js?v=5"></script>
+  <link rel="stylesheet" href="/css/styles.css?v=7">
+  <script defer src="/js/api.js?v=7"></script>
+  <script defer src="/js/admin.js?v=7"></script>
 </head>
 <body>
   <header class="topbar">
@@ -21,10 +21,10 @@
     <section class="page-heading">
       <div>
         <p class="eyebrow">ADMIN DASHBOARD</p>
-        <h1>사용자 및 건강 위험 기록 조회</h1>
+        <h1>사용자 및 건강 기록 조회</h1>
       </div>
       <p>
-        사용자별 BMI, 혈압, 공복 혈당 결과와 위험 기록을 확인합니다.
+        사용자별 날짜 범위 기록과 해당 기간의 수치 평균을 확인합니다.
       </p>
     </section>
 
@@ -58,36 +58,90 @@
     <section id="measurement-panel" class="panel hidden">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">USER HISTORY</p>
+          <p class="eyebrow">USER HISTORY &amp; STATS</p>
           <h2 id="selected-user-title">사용자 측정 기록</h2>
         </div>
       </div>
 
-      <div class="status-legend" aria-label="건강 상태 색상 기준">
-        <span class="status-badge status-yellow">저체중</span>
-        <span class="status-badge status-green">정상</span>
-        <span class="status-badge status-orange">주의</span>
-        <span class="status-badge status-red">위험</span>
-        <span class="status-badge status-neutral">해당 없음</span>
+      <div class="view-switch" role="tablist">
+        <button
+          id="admin-history-view-button"
+          class="view-switch-button active"
+          type="button"
+        >
+          날짜별 측정 기록
+        </button>
+        <button
+          id="admin-average-view-button"
+          class="view-switch-button"
+          type="button"
+        >
+          측정 기록 평균
+        </button>
       </div>
 
-      <div class="table-wrap">
-        <table class="health-result-table compact-history-table">
-          <thead>
-            <tr>
-              <th>날짜</th>
-              <th>키</th>
-              <th>몸무게</th>
-              <th>BMI 판정</th>
-              <th>공복 혈당 판정</th>
-              <th>혈압 판정</th>
-              <th>관리</th>
-            </tr>
-          </thead>
-          <tbody id="measurement-table-body"></tbody>
-        </table>
-      </div>
-      <p id="measurement-empty-message" class="empty-state hidden">측정 기록이 없습니다.</p>
+      <form id="admin-date-filter-form" class="date-filter-form">
+        <label>
+          시작일
+          <input id="admin-filter-start-date" name="start_date" type="date">
+        </label>
+        <label>
+          종료일
+          <input id="admin-filter-end-date" name="end_date" type="date">
+        </label>
+        <button class="primary-button" type="submit">조회</button>
+        <button
+          id="admin-filter-reset-button"
+          class="ghost-button"
+          type="button"
+        >
+          전체 기간
+        </button>
+      </form>
+
+      <section id="admin-history-view" class="record-view">
+        <div class="table-wrap">
+          <table class="health-result-table compact-history-table">
+            <thead>
+              <tr>
+                <th>날짜</th>
+                <th>키</th>
+                <th>몸무게</th>
+                <th>BMI 판정</th>
+                <th>공복 혈당 판정</th>
+                <th>혈압 판정</th>
+                <th>관리</th>
+              </tr>
+            </thead>
+            <tbody id="measurement-table-body"></tbody>
+          </table>
+        </div>
+
+        <p id="measurement-empty-message" class="empty-state hidden">
+          선택한 기간에 측정 기록이 없습니다.
+        </p>
+
+        <nav
+          id="admin-pagination"
+          class="pagination hidden"
+          aria-label="사용자 측정 기록 페이지"
+        ></nav>
+      </section>
+
+      <section id="admin-average-view" class="record-view hidden">
+        <div class="average-summary-heading">
+          <div>
+            <p class="eyebrow">AVERAGE</p>
+            <h3>선택 기간 수치 평균</h3>
+          </div>
+          <span id="admin-average-period-label" class="period-label"></span>
+        </div>
+
+        <div id="admin-average-cards" class="average-grid"></div>
+        <p id="admin-average-empty-message" class="empty-state hidden">
+          평균을 계산할 측정 기록이 없습니다.
+        </p>
+      </section>
     </section>
   </main>
 

@@ -284,3 +284,74 @@ PUT 요청은 날짜·키·몸무게·수축기 혈압·이완기 혈압·공복
 - 종합 결과와 경고 메시지 갱신
 
 관리자는 측정 기록을 조회·삭제할 수 있지만 PUT 수정은 할 수 없습니다.
+
+
+## 날짜 범위 조회와 페이지네이션
+
+사용자 측정 기록 API:
+
+```http
+GET /api/measurements?start_date=2026-07-01&end_date=2026-07-31&page=1&page_size=5
+```
+
+과제 명세의 `/search` 경로도 같은 결과를 반환합니다.
+
+```http
+GET /api/search?start_date=2026-07-01&end_date=2026-07-31&page=1&page_size=5
+```
+
+응답에는 기록과 페이지 정보가 함께 포함됩니다.
+
+```json
+{
+  "measurements": [],
+  "pagination": {
+    "page": 1,
+    "page_size": 5,
+    "total_count": 12,
+    "total_pages": 3,
+    "has_previous": false,
+    "has_next": true
+  },
+  "filters": {
+    "start_date": "2026-07-01",
+    "end_date": "2026-07-31"
+  }
+}
+```
+
+관리자는 특정 사용자에 대해 같은 조건으로 조회합니다.
+
+```http
+GET /api/users/{user_id}/measurements?start_date=&end_date=&page=&page_size=
+```
+
+## 측정 기록 평균
+
+현재 사용자의 선택 기간 평균:
+
+```http
+GET /api/measurements/stats?start_date=2026-07-01&end_date=2026-07-31
+GET /api/stats?start_date=2026-07-01&end_date=2026-07-31
+```
+
+관리자가 선택한 사용자의 평균:
+
+```http
+GET /api/users/{user_id}/measurements/stats?start_date=&end_date=
+```
+
+평균 항목:
+
+```text
+키
+몸무게
+BMI
+수축기 혈압
+이완기 혈압
+공복 혈당
+```
+
+평균은 별도 누적 컬럼에 저장하지 않고 현재 SQLite 기록을 기준으로 서버가 계산합니다. 측정 기록 등록(POST), 전체 수정(PUT), 삭제(DELETE) 응답에도 갱신된 평균이 포함되며, 화면은 해당 작업 직후 기록과 평균을 다시 조회합니다.
+
+사용자와 관리자 화면에는 `날짜별 측정 기록`과 `측정 기록 평균` 전환 버튼이 있습니다. 날짜를 클릭해도 상세 측정 정보를 열 수 있습니다.

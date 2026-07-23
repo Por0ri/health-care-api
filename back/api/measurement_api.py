@@ -4,7 +4,8 @@ from database import (
     create_measurement,
     delete_measurement,
     get_measurement,
-    list_user_measurements,
+    get_measurement_statistics,
+    search_user_measurements,
     update_measurement,
 )
 from .auth import require_role
@@ -13,16 +14,73 @@ from .responses import error_response, success_response
 measurement_api = Blueprint("measurement_api", __name__)
 
 
-@measurement_api.get("/api/measurements")
-@require_role("user")
-def list_measurement_resources():
-    measurements = list_user_measurements(
-        g.session["account_id"]
+def _measurement_query_arguments() -> dict:
+    return {
+        "start_date": request.args.get("start_date"),
+        "end_date": request.args.get("end_date"),
+        "page": request.args.get("page", 1),
+        "page_size": request.args.get("page_size", 5),
+    }
+
+
+def _statistics_query_arguments() -> dict:
+    return {
+        "start_date": request.args.get("start_date"),
+        "end_date": request.args.get("end_date"),
+    }
+
+
+def _current_user_search_response():
+    result = search_user_measurements(
+        g.session["account_id"],
+        **_measurement_query_arguments(),
     )
 
     return success_response(
-        "본인의 측정 정보를 조회했습니다.",
-        {"measurements": measurements},
+        "날짜 범위에 해당하는 측정 기록을 조회했습니다.",
+        result,
+    )
+
+
+@measurement_api.get("/api/measurements")
+@require_role("user")
+def list_measurement_resources():
+    return _current_user_search_response()
+
+
+# 과제 명세의 GET /search에 대응하는 별칭이다.
+@measurement_api.get("/api/search")
+@require_role("user")
+def search_measurement_resources():
+    return _current_user_search_response()
+
+
+@measurement_api.get("/api/measurements/stats")
+@require_role("user")
+def get_measurement_statistics_resource():
+    statistics = get_measurement_statistics(
+        g.session["account_id"],
+        **_statistics_query_arguments(),
+    )
+
+    return success_response(
+        "측정 기록 평균을 계산했습니다.",
+        {"statistics": statistics},
+    )
+
+
+# 과제 명세의 GET /stats에 대응하는 별칭이다.
+@measurement_api.get("/api/stats")
+@require_role("user")
+def get_statistics_alias_resource():
+    statistics = get_measurement_statistics(
+        g.session["account_id"],
+        **_statistics_query_arguments(),
+    )
+
+    return success_response(
+        "측정 기록 평균을 계산했습니다.",
+        {"statistics": statistics},
     )
 
 
@@ -38,16 +96,16 @@ def create_measurement_resource():
             error_type="request",
         )
 
-    measurement = create_measurement(
-        g.session["account_id"],
-        data,
-    )
+    user_id = g.session["account_id"]
+    measurement = create_measurement(user_id, data)
+    statistics = get_measurement_statistics(user_id)
 
     return success_response(
         "건강 수치 계산 후 측정 정보가 저장되었습니다.",
         {
             "measurement": measurement,
             "warnings": measurement.get("warnings", []),
+            "statistics": statistics,
         },
         status=201,
     )
@@ -124,11 +182,14 @@ def update_measurement_resource(measurement_id: int):
             error_type="update_failed",
         )
 
+    statistics = get_measurement_statistics(user_id)
+
     return success_response(
         "측정 기록 전체가 수정되었습니다.",
         {
             "measurement": measurement,
             "warnings": measurement.get("warnings", []),
+            "statistics": statistics,
         },
     )
 
@@ -162,6 +223,10 @@ def delete_measurement_resource(measurement_id: int):
             error_type="delete_failed",
         )
 
+    statistics = get_measurement_statistics(
+        measurement["user_id"]
+    )
+
     return success_response(
         "측정 기록이 삭제되었습니다.",
         {
@@ -171,5 +236,6 @@ def delete_measurement_resource(measurement_id: int):
                 "role": role,
                 "account_id": account_id,
             },
+            "statistics": statistics,
         },
     )
