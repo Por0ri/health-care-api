@@ -1,12 +1,15 @@
 import os
-import sqlite3
 
 from flask import Flask
 from werkzeug.exceptions import HTTPException
 
 from api import register_blueprints
 from api.responses import error_response
-from database import DB_PATH, initialize_database
+from database import (
+    DATA_PATH,
+    DataStoreError,
+    initialize_database,
+)
 
 HOST = os.getenv("HEALTH_SERVER_HOST", "0.0.0.0")
 PORT = int(os.getenv("HEALTH_SERVER_PORT", "5000"))
@@ -33,12 +36,13 @@ def create_app() -> Flask:
             error_type="validation",
         )
 
-    @app.errorhandler(sqlite3.IntegrityError)
-    def handle_integrity_error(error: sqlite3.IntegrityError):
+    @app.errorhandler(DataStoreError)
+    def handle_data_store_error(error: DataStoreError):
+        app.logger.exception("JSON 저장소 오류")
         return error_response(
-            "데이터 제약조건을 확인해 주세요.",
-            status=409,
-            error_type="database_constraint",
+            str(error),
+            status=500,
+            error_type="json_storage",
         )
 
     @app.errorhandler(HTTPException)
@@ -69,7 +73,7 @@ if __name__ == "__main__":
     print("Health Care REST API 서버가 실행됩니다.")
     print(f"주소: http://{HOST}:{PORT}")
     print(f"API 목록: http://127.0.0.1:{PORT}/api")
-    print(f"SQLite DB: {DB_PATH}")
+    print(f"JSON 데이터: {DATA_PATH}")
     print("기본 관리자: admin / admin")
     print("=" * 58)
 

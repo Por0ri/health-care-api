@@ -12,6 +12,7 @@ def health_check():
         {
             "service": "health-care-rest-api",
             "status": "ok",
+            "storage": "json",
         },
     )
 

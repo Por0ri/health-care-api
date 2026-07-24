@@ -1,13 +1,20 @@
 __pycache__/
 *.py[cod]
 *.log
-*.zip
-.git/
-.gitignore
+
 .vscode/
 .idea/
 
+.env
+.env.*
+
 data.json
 back/data.json
+*.json.tmp
+.data.json.*.tmp
+
 health_measurement.db
 back/health_measurement.db
+
+.DS_Store
+Thumbs.db

@@ -261,3 +261,25 @@ POST   /api/measurements
 PUT    /api/measurements/{measurement_id}
 DELETE /api/measurements/{measurement_id}
 ```
+
+
+## 데이터 저장 형식
+
+REST API의 요청과 응답 형식은 기존과 동일하며, 서버 내부 저장 방식만 JSON 파일로 변경되었습니다.
+
+```text
+HEALTH_DATA_PATH=/data/data.json
+```
+
+저장되는 최상위 구조:
+
+```json
+{
+  "schema_version": 1,
+  "users": [],
+  "measurements": [],
+  "next_measurement_id": 1
+}
+```
+
+POST·PUT·DELETE 요청이 성공할 때마다 변경된 전체 데이터가 임시 JSON 파일에 기록된 후 원본 `data.json`으로 교체됩니다. GET·날짜 검색·페이지네이션·평균 API는 해당 JSON 파일을 읽어 처리합니다.

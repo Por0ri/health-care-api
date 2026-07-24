@@ -1,19 +1,31 @@
 import hashlib
 import hmac
+import json
 import math
 import os
 import secrets
-import sqlite3
+import tempfile
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 DATE_FORMAT = "%Y-%m-%d"
 SESSION_HOURS = int(os.getenv("SESSION_HOURS", "12"))
+
 BACK_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(
-    os.getenv("HEALTH_DB_PATH", str(BACK_DIR / "health_measurement.db"))
+DATA_PATH = Path(
+    os.getenv("HEALTH_DATA_PATH", str(BACK_DIR / "data.json"))
 ).resolve()
+LEGACY_DB_PATH = Path(
+    os.getenv(
+        "HEALTH_LEGACY_DB_PATH",
+        str(DATA_PATH.with_name("health_measurement.db")),
+    )
+).resolve()
+
+ADMIN_ID = os.getenv("HEALTH_ADMIN_ID", "admin")
+ADMIN_PASSWORD = os.getenv("HEALTH_ADMIN_PASSWORD", "admin")
 
 STATUS_NEUTRAL = "neutral"
 STATUS_YELLOW = "yellow"
@@ -21,28 +33,13 @@ STATUS_GREEN = "green"
 STATUS_ORANGE = "orange"
 STATUS_RED = "red"
 
-DERIVED_MEASUREMENT_COLUMNS = {
-    "bmi": "REAL",
-    "bmi_category": "TEXT NOT NULL DEFAULT '해당 없음'",
-    "bmi_status": "TEXT NOT NULL DEFAULT 'neutral'",
-    "blood_pressure_category": "TEXT NOT NULL DEFAULT '해당 없음'",
-    "blood_pressure_status": "TEXT NOT NULL DEFAULT 'neutral'",
-    "fasting_glucose_category": "TEXT NOT NULL DEFAULT '해당 없음'",
-    "fasting_glucose_status": "TEXT NOT NULL DEFAULT 'neutral'",
-    "overall_category": "TEXT NOT NULL DEFAULT '해당 없음'",
-    "overall_status": "TEXT NOT NULL DEFAULT 'neutral'",
-    "warning_message": "TEXT DEFAULT NULL",
-}
+_DATA_LOCK = threading.RLock()
+_SESSION_LOCK = threading.RLock()
+_SESSIONS: dict[str, dict[str, str]] = {}
 
 
-def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+class DataStoreError(RuntimeError):
+    """JSON 파일 읽기 또는 저장 중 발생한 저장소 오류."""
 
 
 def utc_now() -> datetime:
@@ -78,323 +75,306 @@ def verify_password(password: str, stored_value: str) -> bool:
     return hmac.compare_digest(actual_hash.hex(), expected_hash_hex)
 
 
-def _ensure_measurement_columns(conn: sqlite3.Connection) -> None:
-    existing_columns = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(measurements)").fetchall()
+def _default_store() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "users": [],
+        "measurements": [],
+        "next_measurement_id": 1,
     }
 
-    for column_name, column_definition in DERIVED_MEASUREMENT_COLUMNS.items():
-        if column_name in existing_columns:
+
+def _write_store_unlocked(store: dict[str, Any]) -> None:
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path: Optional[Path] = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=DATA_PATH.parent,
+            prefix=f".{DATA_PATH.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+
+            json.dump(
+                store,
+                temporary_file,
+                ensure_ascii=False,
+                indent=2,
+            )
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        os.replace(temporary_path, DATA_PATH)
+    except OSError as error:
+        raise DataStoreError(
+            f"JSON 데이터 파일을 저장하지 못했습니다: {error}"
+        ) from error
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink(missing_ok=True)
+
+
+def _read_store_unlocked() -> dict[str, Any]:
+    if not DATA_PATH.exists():
+        return _default_store()
+
+    try:
+        with DATA_PATH.open("r", encoding="utf-8") as data_file:
+            raw_store = json.load(data_file)
+    except json.JSONDecodeError as error:
+        raise DataStoreError(
+            f"data.json 형식이 올바르지 않습니다: "
+            f"{error.lineno}행 {error.colno}열"
+        ) from error
+    except OSError as error:
+        raise DataStoreError(
+            f"JSON 데이터 파일을 읽지 못했습니다: {error}"
+        ) from error
+
+    return _normalize_store(raw_store)
+
+
+def _normalize_store(raw_store: Any) -> dict[str, Any]:
+    if not isinstance(raw_store, dict):
+        raise DataStoreError("data.json의 최상위 값은 객체여야 합니다.")
+
+    users = raw_store.get("users", [])
+    measurements = raw_store.get("measurements", [])
+
+    if not isinstance(users, list):
+        raise DataStoreError("data.json의 users는 배열이어야 합니다.")
+
+    if not isinstance(measurements, list):
+        raise DataStoreError(
+            "data.json의 measurements는 배열이어야 합니다."
+        )
+
+    normalized_users: list[dict[str, Any]] = []
+
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+
+        user_id = str(user.get("user_id", "")).strip()
+        password_hash = str(user.get("pw", "")).strip()
+        name = str(user.get("name", "")).strip()
+        birth = str(user.get("birth", "")).strip()
+
+        if not all([user_id, password_hash, name, birth]):
+            continue
+
+        normalized_users.append(
+            {
+                "user_id": user_id,
+                "pw": password_hash,
+                "name": name,
+                "birth": birth,
+            }
+        )
+
+    normalized_measurements: list[dict[str, Any]] = []
+    largest_id = 0
+
+    for measurement in measurements:
+        if not isinstance(measurement, dict):
             continue
 
         try:
-            conn.execute(
-                f"ALTER TABLE measurements "
-                f"ADD COLUMN {column_name} {column_definition}"
-            )
-        except sqlite3.OperationalError as error:
-            # Gunicorn 워커가 동시에 초기화할 때 다른 워커가 먼저
-            # 컬럼을 추가했다면 중복 컬럼 오류만 무시한다.
-            if "duplicate column name" not in str(error).lower():
-                raise
+            measurement_id = int(measurement["id"])
+            user_id = str(measurement["user_id"]).strip()
+            measurement_date = parse_date(
+                str(measurement["date"]),
+                "측정 날짜",
+            ).isoformat()
+            height = float(measurement["height"])
+            weight = float(measurement["weight"])
+            systolic = int(measurement["systolic"])
+            diastolic = int(measurement["diastolic"])
+            blood_sugar = float(measurement["blood_sugar"])
+        except (KeyError, TypeError, ValueError):
+            continue
 
-
-def _status_priority(status: str) -> int:
-    priorities = {
-        STATUS_NEUTRAL: 0,
-        STATUS_GREEN: 1,
-        STATUS_YELLOW: 2,
-        STATUS_ORANGE: 3,
-        STATUS_RED: 4,
-    }
-    return priorities.get(status, 0)
-
-
-def classify_bmi(bmi: Optional[float]) -> tuple[str, str]:
-    if bmi is None:
-        return "해당 없음", STATUS_NEUTRAL
-    if bmi < 18.5:
-        return "저체중", STATUS_YELLOW
-    if bmi < 23:
-        return "정상", STATUS_GREEN
-    if bmi < 25:
-        return "과체중", STATUS_ORANGE
-    return "비만", STATUS_RED
-
-
-def classify_blood_pressure(
-    systolic: Optional[int],
-    diastolic: Optional[int],
-) -> tuple[str, str]:
-    if systolic is None or diastolic is None:
-        return "해당 없음", STATUS_NEUTRAL
-
-    if systolic >= 140 or diastolic >= 90:
-        return "고혈압", STATUS_RED
-
-    if systolic >= 120 or diastolic >= 80:
-        return "주의", STATUS_ORANGE
-
-    if systolic < 120 and diastolic < 80:
-        return "정상", STATUS_GREEN
-
-    return "해당 없음", STATUS_NEUTRAL
-
-
-def classify_fasting_glucose(
-    blood_sugar: Optional[float],
-) -> tuple[str, str]:
-    if blood_sugar is None:
-        return "해당 없음", STATUS_NEUTRAL
-    if blood_sugar < 100:
-        return "정상", STATUS_GREEN
-    if blood_sugar <= 125:
-        return "공복혈당장애", STATUS_ORANGE
-    return "당뇨 의심", STATUS_RED
-
-
-def calculate_health_assessment(
-    height: Optional[float],
-    weight: Optional[float],
-    systolic: Optional[int],
-    diastolic: Optional[int],
-    blood_sugar: Optional[float],
-) -> dict[str, Any]:
-    bmi: Optional[float] = None
-
-    if (
-        height is not None
-        and weight is not None
-        and float(height) > 0
-        and float(weight) > 0
-    ):
-        height_meters = float(height) / 100
-        bmi = round(float(weight) / (height_meters ** 2), 1)
-
-    bmi_category, bmi_status = classify_bmi(bmi)
-    blood_pressure_category, blood_pressure_status = classify_blood_pressure(
-        int(systolic) if systolic is not None else None,
-        int(diastolic) if diastolic is not None else None,
-    )
-    fasting_glucose_category, fasting_glucose_status = (
-        classify_fasting_glucose(
-            float(blood_sugar) if blood_sugar is not None else None
-        )
-    )
-
-    statuses = [
-        bmi_status,
-        blood_pressure_status,
-        fasting_glucose_status,
-    ]
-
-    if STATUS_RED in statuses:
-        overall_category = "위험"
-        overall_status = STATUS_RED
-    elif STATUS_ORANGE in statuses:
-        overall_category = "주의"
-        overall_status = STATUS_ORANGE
-    elif STATUS_YELLOW in statuses:
-        overall_category = "관찰"
-        overall_status = STATUS_YELLOW
-    elif statuses and all(status == STATUS_GREEN for status in statuses):
-        overall_category = "정상"
-        overall_status = STATUS_GREEN
-    else:
-        overall_category = "해당 없음"
-        overall_status = STATUS_NEUTRAL
-
-    warnings: list[str] = []
-
-    if bmi_status == STATUS_RED:
-        warnings.append("BMI가 비만 범위입니다.")
-    if blood_pressure_status == STATUS_RED:
-        warnings.append("혈압이 고혈압 범위입니다.")
-    if fasting_glucose_status == STATUS_RED:
-        warnings.append("공복 혈당이 당뇨 의심 범위입니다.")
-
-    warning_message = "\n".join(warnings) if warnings else None
-
-    return {
-        "bmi": bmi,
-        "bmi_category": bmi_category,
-        "bmi_status": bmi_status,
-        "blood_pressure_category": blood_pressure_category,
-        "blood_pressure_status": blood_pressure_status,
-        "fasting_glucose_category": fasting_glucose_category,
-        "fasting_glucose_status": fasting_glucose_status,
-        "overall_category": overall_category,
-        "overall_status": overall_status,
-        "warning_message": warning_message,
-        "warnings": warnings,
-    }
-
-
-def _serialize_measurement(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    measurement = dict(row)
-    warning_message = measurement.get("warning_message")
-
-    measurement["warnings"] = (
-        [
-            line.strip()
-            for line in str(warning_message).splitlines()
-            if line.strip()
-        ]
-        if warning_message
-        else []
-    )
-
-    return measurement
-
-
-def _recalculate_existing_measurements(conn: sqlite3.Connection) -> None:
-    rows = conn.execute(
-        """
-        SELECT
-            id,
+        assessment = calculate_health_assessment(
             height,
             weight,
             systolic,
             diastolic,
-            blood_sugar
-        FROM measurements
-        """
-    ).fetchall()
+            blood_sugar,
+        )
 
-    for row in rows:
+        memo_value = measurement.get("memo")
+        memo = (
+            str(memo_value).strip() or None
+            if memo_value is not None
+            else None
+        )
+
+        normalized_measurements.append(
+            {
+                "id": measurement_id,
+                "user_id": user_id,
+                "date": measurement_date,
+                "height": height,
+                "weight": weight,
+                "systolic": systolic,
+                "diastolic": diastolic,
+                "blood_sugar": blood_sugar,
+                **_assessment_for_storage(assessment),
+                "memo": memo,
+            }
+        )
+
+        largest_id = max(largest_id, measurement_id)
+
+    try:
+        requested_next_id = int(
+            raw_store.get("next_measurement_id", largest_id + 1)
+        )
+    except (TypeError, ValueError):
+        requested_next_id = largest_id + 1
+
+    return {
+        "schema_version": 1,
+        "users": normalized_users,
+        "measurements": normalized_measurements,
+        "next_measurement_id": max(
+            largest_id + 1,
+            requested_next_id,
+            1,
+        ),
+    }
+
+
+def _load_store() -> dict[str, Any]:
+    with _DATA_LOCK:
+        return _read_store_unlocked()
+
+
+def _migrate_legacy_sqlite_unlocked() -> Optional[dict[str, Any]]:
+    if not LEGACY_DB_PATH.exists():
+        return None
+
+    try:
+        import sqlite3
+
+        connection = sqlite3.connect(LEGACY_DB_PATH)
+        connection.row_factory = sqlite3.Row
+
+        table_names = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+        if "users" not in table_names or "measurements" not in table_names:
+            connection.close()
+            return None
+
+        users = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT user_id, pw, name, birth FROM users"
+            ).fetchall()
+        ]
+
+        raw_measurements = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    date,
+                    height,
+                    weight,
+                    systolic,
+                    diastolic,
+                    blood_sugar,
+                    memo
+                FROM measurements
+                ORDER BY id
+                """
+            ).fetchall()
+        ]
+
+        connection.close()
+    except Exception as error:
+        raise DataStoreError(
+            f"기존 SQLite 데이터를 JSON으로 변환하지 못했습니다: {error}"
+        ) from error
+
+    measurements: list[dict[str, Any]] = []
+    largest_id = 0
+
+    for row in raw_measurements:
         assessment = calculate_health_assessment(
-            row["height"],
-            row["weight"],
-            row["systolic"],
-            row["diastolic"],
-            row["blood_sugar"],
+            row.get("height"),
+            row.get("weight"),
+            row.get("systolic"),
+            row.get("diastolic"),
+            row.get("blood_sugar"),
         )
 
-        conn.execute(
-            """
-            UPDATE measurements
-            SET
-                bmi = ?,
-                bmi_category = ?,
-                bmi_status = ?,
-                blood_pressure_category = ?,
-                blood_pressure_status = ?,
-                fasting_glucose_category = ?,
-                fasting_glucose_status = ?,
-                overall_category = ?,
-                overall_status = ?,
-                warning_message = ?
-            WHERE id = ?
-            """,
-            (
-                assessment["bmi"],
-                assessment["bmi_category"],
-                assessment["bmi_status"],
-                assessment["blood_pressure_category"],
-                assessment["blood_pressure_status"],
-                assessment["fasting_glucose_category"],
-                assessment["fasting_glucose_status"],
-                assessment["overall_category"],
-                assessment["overall_status"],
-                assessment["warning_message"],
-                row["id"],
-            ),
+        measurement_id = int(row["id"])
+        largest_id = max(largest_id, measurement_id)
+
+        measurements.append(
+            {
+                "id": measurement_id,
+                "user_id": row["user_id"],
+                "date": row["date"],
+                "height": float(row["height"]),
+                "weight": float(row["weight"]),
+                "systolic": int(row["systolic"]),
+                "diastolic": int(row["diastolic"]),
+                "blood_sugar": float(row["blood_sugar"]),
+                **_assessment_for_storage(assessment),
+                "memo": row.get("memo"),
+            }
         )
+
+    return _normalize_store(
+        {
+            "schema_version": 1,
+            "users": users,
+            "measurements": measurements,
+            "next_measurement_id": largest_id + 1,
+        }
+    )
 
 
 def initialize_database() -> None:
-    with get_connection() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                pw      TEXT NOT NULL,
-                name    TEXT NOT NULL,
-                birth   TEXT NOT NULL
-            );
+    """기존 함수명을 유지하지만 실제 저장소는 JSON 파일이다."""
+    with _DATA_LOCK:
+        if not DATA_PATH.exists():
+            migrated_store = _migrate_legacy_sqlite_unlocked()
+            store = migrated_store or _default_store()
+            _write_store_unlocked(store)
+            return
 
-            CREATE TABLE IF NOT EXISTS admins (
-                admin_id TEXT PRIMARY KEY,
-                pw       TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS measurements (
-                id                         INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id                    TEXT NOT NULL,
-                date                       TEXT NOT NULL,
-                height                     REAL NOT NULL CHECK (height > 0),
-                weight                     REAL NOT NULL CHECK (weight > 0),
-                systolic                   INTEGER NOT NULL CHECK (systolic > 0),
-                diastolic                  INTEGER NOT NULL CHECK (diastolic > 0),
-                blood_sugar                REAL NOT NULL CHECK (blood_sugar >= 0),
-                bmi                        REAL,
-                bmi_category               TEXT NOT NULL DEFAULT '해당 없음',
-                bmi_status                 TEXT NOT NULL DEFAULT 'neutral',
-                blood_pressure_category    TEXT NOT NULL DEFAULT '해당 없음',
-                blood_pressure_status      TEXT NOT NULL DEFAULT 'neutral',
-                fasting_glucose_category   TEXT NOT NULL DEFAULT '해당 없음',
-                fasting_glucose_status     TEXT NOT NULL DEFAULT 'neutral',
-                overall_category           TEXT NOT NULL DEFAULT '해당 없음',
-                overall_status             TEXT NOT NULL DEFAULT 'neutral',
-                warning_message            TEXT DEFAULT NULL,
-                memo                       TEXT DEFAULT NULL,
-
-                FOREIGN KEY (user_id)
-                    REFERENCES users(user_id)
-                    ON UPDATE CASCADE
-                    ON DELETE CASCADE,
-
-                UNIQUE (user_id, date)
-            );
-
-            CREATE TABLE IF NOT EXISTS sessions (
-                token       TEXT PRIMARY KEY,
-                role        TEXT NOT NULL CHECK (role IN ('user', 'admin')),
-                account_id  TEXT NOT NULL,
-                expires_at  TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_measurements_user_date
-                ON measurements(user_id, date);
-            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at
-                ON sessions(expires_at);
-            """
-        )
-
-        _ensure_measurement_columns(conn)
-
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_measurements_overall_status
-            ON measurements(overall_status)
-            """
-        )
-
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO admins (admin_id, pw)
-            VALUES (?, ?)
-            """,
-            ("admin", hash_password("admin")),
-        )
-
-        conn.execute(
-            "DELETE FROM sessions WHERE expires_at <= ?",
-            (utc_now().isoformat(),),
-        )
-
-        _recalculate_existing_measurements(conn)
+        normalized_store = _read_store_unlocked()
+        _write_store_unlocked(normalized_store)
 
 
 def parse_date(value: Any, field_name: str) -> date:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name}은 YYYY-MM-DD 형식의 문자열이어야 합니다.")
+        raise ValueError(
+            f"{field_name}은 YYYY-MM-DD 형식의 문자열이어야 합니다."
+        )
 
     try:
         return datetime.strptime(value, DATE_FORMAT).date()
     except ValueError as exc:
-        raise ValueError(f"{field_name}은 YYYY-MM-DD 형식이어야 합니다.") from exc
+        raise ValueError(
+            f"{field_name}은 YYYY-MM-DD 형식이어야 합니다."
+        ) from exc
 
 
 def require_text(data: dict[str, Any], key: str, label: str) -> str:
@@ -430,11 +410,156 @@ def require_number(
     return number
 
 
+def classify_bmi(bmi: Optional[float]) -> tuple[str, str]:
+    if bmi is None:
+        return "해당 없음", STATUS_NEUTRAL
+    if bmi < 18.5:
+        return "저체중", STATUS_YELLOW
+    if bmi < 23:
+        return "정상", STATUS_GREEN
+    if bmi < 25:
+        return "과체중", STATUS_ORANGE
+    return "비만", STATUS_RED
+
+
+def classify_blood_pressure(
+    systolic: Optional[int],
+    diastolic: Optional[int],
+) -> tuple[str, str]:
+    if systolic is None or diastolic is None:
+        return "해당 없음", STATUS_NEUTRAL
+
+    if systolic >= 140 or diastolic >= 90:
+        return "고혈압", STATUS_RED
+
+    if systolic >= 120 or diastolic >= 80:
+        return "주의", STATUS_ORANGE
+
+    return "정상", STATUS_GREEN
+
+
+def classify_fasting_glucose(
+    blood_sugar: Optional[float],
+) -> tuple[str, str]:
+    if blood_sugar is None:
+        return "해당 없음", STATUS_NEUTRAL
+    if blood_sugar < 100:
+        return "정상", STATUS_GREEN
+    if blood_sugar <= 125:
+        return "공복혈당장애", STATUS_ORANGE
+    return "당뇨 의심", STATUS_RED
+
+
+def calculate_health_assessment(
+    height: Optional[float],
+    weight: Optional[float],
+    systolic: Optional[int],
+    diastolic: Optional[int],
+    blood_sugar: Optional[float],
+) -> dict[str, Any]:
+    bmi: Optional[float] = None
+
+    if (
+        height is not None
+        and weight is not None
+        and float(height) > 0
+        and float(weight) > 0
+    ):
+        height_meters = float(height) / 100
+        bmi = round(float(weight) / (height_meters ** 2), 1)
+
+    bmi_category, bmi_status = classify_bmi(bmi)
+    pressure_category, pressure_status = classify_blood_pressure(
+        int(systolic) if systolic is not None else None,
+        int(diastolic) if diastolic is not None else None,
+    )
+    glucose_category, glucose_status = classify_fasting_glucose(
+        float(blood_sugar) if blood_sugar is not None else None
+    )
+
+    statuses = [
+        bmi_status,
+        pressure_status,
+        glucose_status,
+    ]
+
+    if STATUS_RED in statuses:
+        overall_category = "위험"
+        overall_status = STATUS_RED
+    elif STATUS_ORANGE in statuses:
+        overall_category = "주의"
+        overall_status = STATUS_ORANGE
+    elif STATUS_YELLOW in statuses:
+        overall_category = "관찰"
+        overall_status = STATUS_YELLOW
+    elif statuses and all(status == STATUS_GREEN for status in statuses):
+        overall_category = "정상"
+        overall_status = STATUS_GREEN
+    else:
+        overall_category = "해당 없음"
+        overall_status = STATUS_NEUTRAL
+
+    warnings: list[str] = []
+
+    if bmi_status == STATUS_RED:
+        warnings.append("BMI가 비만 범위입니다.")
+    if pressure_status == STATUS_RED:
+        warnings.append("혈압이 고혈압 범위입니다.")
+    if glucose_status == STATUS_RED:
+        warnings.append("공복 혈당이 당뇨 의심 범위입니다.")
+
+    return {
+        "bmi": bmi,
+        "bmi_category": bmi_category,
+        "bmi_status": bmi_status,
+        "blood_pressure_category": pressure_category,
+        "blood_pressure_status": pressure_status,
+        "fasting_glucose_category": glucose_category,
+        "fasting_glucose_status": glucose_status,
+        "overall_category": overall_category,
+        "overall_status": overall_status,
+        "warning_message": "\n".join(warnings) if warnings else None,
+        "warnings": warnings,
+    }
+
+
+def _assessment_for_storage(
+    assessment: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in assessment.items()
+        if key != "warnings"
+    }
+
+
+def _serialize_measurement(
+    measurement: dict[str, Any],
+) -> dict[str, Any]:
+    result = dict(measurement)
+    warning_message = result.get("warning_message")
+
+    result["warnings"] = (
+        [
+            line.strip()
+            for line in str(warning_message).splitlines()
+            if line.strip()
+        ]
+        if warning_message
+        else []
+    )
+
+    return result
+
+
 def create_user(data: dict[str, Any]) -> dict[str, str]:
     user_id = require_text(data, "user_id", "사용자 ID")
     password = require_text(data, "pw", "비밀번호")
     name = require_text(data, "name", "이름")
-    birth = parse_date(require_text(data, "birth", "생년월일"), "생년월일")
+    birth = parse_date(
+        require_text(data, "birth", "생년월일"),
+        "생년월일",
+    )
 
     if len(password) < 4:
         raise ValueError("비밀번호는 4자 이상이어야 합니다.")
@@ -442,22 +567,25 @@ def create_user(data: dict[str, Any]) -> dict[str, str]:
     if birth > date.today():
         raise ValueError("생년월일은 미래 날짜일 수 없습니다.")
 
-    with get_connection() as conn:
-        exists = conn.execute(
-            "SELECT 1 FROM users WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
+    with _DATA_LOCK:
+        store = _read_store_unlocked()
 
-        if exists:
+        if any(
+            user["user_id"] == user_id
+            for user in store["users"]
+        ):
             raise ValueError("이미 존재하는 사용자 ID입니다.")
 
-        conn.execute(
-            """
-            INSERT INTO users (user_id, pw, name, birth)
-            VALUES (?, ?, ?, ?)
-            """,
-            (user_id, hash_password(password), name, birth.isoformat()),
+        store["users"].append(
+            {
+                "user_id": user_id,
+                "pw": hash_password(password),
+                "name": name,
+                "birth": birth.isoformat(),
+            }
         )
+
+        _write_store_unlocked(store)
 
     return {
         "user_id": user_id,
@@ -467,23 +595,28 @@ def create_user(data: dict[str, Any]) -> dict[str, str]:
 
 
 def authenticate_user(user_id: str, password: str) -> bool:
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT pw FROM users WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
+    store = _load_store()
 
-    return row is not None and verify_password(password, row["pw"])
+    user = next(
+        (
+            item
+            for item in store["users"]
+            if item["user_id"] == user_id
+        ),
+        None,
+    )
+
+    return (
+        user is not None
+        and verify_password(password, user["pw"])
+    )
 
 
 def authenticate_admin(admin_id: str, password: str) -> bool:
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT pw FROM admins WHERE admin_id = ?",
-            (admin_id,),
-        ).fetchone()
-
-    return row is not None and verify_password(password, row["pw"])
+    return (
+        hmac.compare_digest(admin_id, ADMIN_ID)
+        and hmac.compare_digest(password, ADMIN_PASSWORD)
+    )
 
 
 def create_session(role: str, account_id: str) -> dict[str, str]:
@@ -493,62 +626,57 @@ def create_session(role: str, account_id: str) -> dict[str, str]:
     token = secrets.token_urlsafe(32)
     expires_at = utc_now() + timedelta(hours=SESSION_HOURS)
 
-    with get_connection() as conn:
-        conn.execute(
-            "DELETE FROM sessions WHERE expires_at <= ?",
-            (utc_now().isoformat(),),
-        )
-        conn.execute(
-            """
-            INSERT INTO sessions (token, role, account_id, expires_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (token, role, account_id, expires_at.isoformat()),
-        )
-
-    return {
+    session = {
         "token": token,
         "role": role,
         "account_id": account_id,
         "expires_at": expires_at.isoformat(),
     }
 
+    with _SESSION_LOCK:
+        _remove_expired_sessions_unlocked()
+        _SESSIONS[token] = session
+
+    return dict(session)
+
+
+def _remove_expired_sessions_unlocked() -> None:
+    current_time = utc_now()
+
+    expired_tokens = []
+
+    for token, session in _SESSIONS.items():
+        try:
+            expires_at = datetime.fromisoformat(
+                session["expires_at"]
+            )
+        except (KeyError, ValueError):
+            expired_tokens.append(token)
+            continue
+
+        if expires_at <= current_time:
+            expired_tokens.append(token)
+
+    for token in expired_tokens:
+        _SESSIONS.pop(token, None)
+
 
 def get_session(token: str) -> Optional[dict[str, str]]:
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT token, role, account_id, expires_at
-            FROM sessions
-            WHERE token = ?
-            """,
-            (token,),
-        ).fetchone()
+    with _SESSION_LOCK:
+        _remove_expired_sessions_unlocked()
+        session = _SESSIONS.get(token)
 
-        if row is None:
-            return None
-
-        session = dict(row)
-
-        try:
-            expires_at = datetime.fromisoformat(session["expires_at"])
-        except ValueError:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
-            return None
-
-        if expires_at <= utc_now():
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
-            return None
-
-    return session
+        return dict(session) if session is not None else None
 
 
 def delete_session(token: str) -> None:
-    with get_connection() as conn:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    with _SESSION_LOCK:
+        _SESSIONS.pop(token, None)
 
 
-def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
+def _parse_measurement_payload(
+    data: dict[str, Any],
+) -> dict[str, Any]:
     measurement_date = parse_date(
         require_text(data, "date", "측정 날짜"),
         "측정 날짜",
@@ -557,8 +685,18 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
     if measurement_date > date.today():
         raise ValueError("미래 날짜의 측정 정보는 입력할 수 없습니다.")
 
-    height = require_number(data, "height", "키", minimum=0.1)
-    weight = require_number(data, "weight", "몸무게", minimum=0.1)
+    height = require_number(
+        data,
+        "height",
+        "키",
+        minimum=0.1,
+    )
+    weight = require_number(
+        data,
+        "weight",
+        "몸무게",
+        minimum=0.1,
+    )
     systolic = require_number(
         data,
         "systolic",
@@ -581,118 +719,137 @@ def create_measurement(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
     )
 
     if systolic <= diastolic:
-        raise ValueError("수축기 혈압은 이완기 혈압보다 커야 합니다.")
+        raise ValueError(
+            "수축기 혈압은 이완기 혈압보다 커야 합니다."
+        )
 
     memo_value = data.get("memo")
+
     if memo_value is not None and not isinstance(memo_value, str):
         raise ValueError("메모는 문자열이어야 합니다.")
 
-    memo = memo_value.strip() or None if isinstance(memo_value, str) else None
-    previous_date = (measurement_date - timedelta(days=1)).isoformat()
+    return {
+        "date": measurement_date.isoformat(),
+        "height": float(height),
+        "weight": float(weight),
+        "systolic": int(systolic),
+        "diastolic": int(diastolic),
+        "blood_sugar": float(blood_sugar),
+        "memo": (
+            memo_value.strip() or None
+            if isinstance(memo_value, str)
+            else None
+        ),
+    }
 
-    assessment = calculate_health_assessment(
-        float(height),
-        float(weight),
-        int(systolic),
-        int(diastolic),
-        float(blood_sugar),
+
+def _user_measurements(
+    store: dict[str, Any],
+    user_id: str,
+    *,
+    exclude_measurement_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    return [
+        measurement
+        for measurement in store["measurements"]
+        if measurement["user_id"] == user_id
+        and (
+            exclude_measurement_id is None
+            or measurement["id"] != exclude_measurement_id
+        )
+    ]
+
+
+def _validate_measurement_consistency(
+    existing_measurements: list[dict[str, Any]],
+    candidate: dict[str, Any],
+) -> None:
+    candidate_date = parse_date(
+        candidate["date"],
+        "측정 날짜",
     )
 
-    with get_connection() as conn:
-        duplicate = conn.execute(
-            """
-            SELECT 1
-            FROM measurements
-            WHERE user_id = ? AND date = ?
-            """,
-            (user_id, measurement_date.isoformat()),
-        ).fetchone()
-
-        if duplicate:
-            raise ValueError("해당 날짜의 측정 정보가 이미 존재합니다.")
-
-        previous = conn.execute(
-            """
-            SELECT height, weight
-            FROM measurements
-            WHERE user_id = ? AND date = ?
-            """,
-            (user_id, previous_date),
-        ).fetchone()
-
-        if previous is not None:
-            height_difference = abs(float(height) - previous["height"])
-            weight_difference = abs(float(weight) - previous["weight"])
-
-            if height_difference >= 3:
-                raise ValueError(
-                    f"전날 키와 {height_difference:.1f}cm 차이가 납니다. "
-                    "전날 대비 3cm 이상 차이 나는 값은 입력할 수 없습니다."
-                )
-
-            if weight_difference >= 5:
-                raise ValueError(
-                    f"전날 몸무게와 {weight_difference:.1f}kg 차이가 납니다. "
-                    "전날 대비 5kg 이상 차이 나는 값은 입력할 수 없습니다."
-                )
-
-        cursor = conn.execute(
-            """
-            INSERT INTO measurements (
-                user_id,
-                date,
-                height,
-                weight,
-                systolic,
-                diastolic,
-                blood_sugar,
-                bmi,
-                bmi_category,
-                bmi_status,
-                blood_pressure_category,
-                blood_pressure_status,
-                fasting_glucose_category,
-                fasting_glucose_status,
-                overall_category,
-                overall_status,
-                warning_message,
-                memo
-            )
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
-            (
-                user_id,
-                measurement_date.isoformat(),
-                height,
-                weight,
-                systolic,
-                diastolic,
-                blood_sugar,
-                assessment["bmi"],
-                assessment["bmi_category"],
-                assessment["bmi_status"],
-                assessment["blood_pressure_category"],
-                assessment["blood_pressure_status"],
-                assessment["fasting_glucose_category"],
-                assessment["fasting_glucose_status"],
-                assessment["overall_category"],
-                assessment["overall_status"],
-                assessment["warning_message"],
-                memo,
-            ),
+    if any(
+        measurement["date"] == candidate["date"]
+        for measurement in existing_measurements
+    ):
+        raise ValueError(
+            "해당 날짜의 다른 측정 정보가 이미 존재합니다."
         )
 
-        measurement_id = int(cursor.lastrowid)
+    date_labels = {
+        (candidate_date - timedelta(days=1)).isoformat(): "전날",
+        (candidate_date + timedelta(days=1)).isoformat(): "다음 날",
+    }
 
-    measurement = get_measurement(measurement_id)
-    if measurement is None:
-        raise RuntimeError("저장된 측정 정보를 조회하지 못했습니다.")
+    for measurement in existing_measurements:
+        label = date_labels.get(measurement["date"])
 
-    return measurement
+        if label is None:
+            continue
 
+        height_difference = abs(
+            candidate["height"] - float(measurement["height"])
+        )
+        weight_difference = abs(
+            candidate["weight"] - float(measurement["weight"])
+        )
+
+        if height_difference >= 3:
+            raise ValueError(
+                f"{label} 키와 {height_difference:.1f}cm 차이가 납니다. "
+                "인접 날짜 대비 3cm 이상 차이 나는 값은 "
+                "입력할 수 없습니다."
+            )
+
+        if weight_difference >= 5:
+            raise ValueError(
+                f"{label} 몸무게와 {weight_difference:.1f}kg "
+                "차이가 납니다. 인접 날짜 대비 5kg 이상 "
+                "차이 나는 값은 입력할 수 없습니다."
+            )
+
+
+def create_measurement(
+    user_id: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    payload = _parse_measurement_payload(data)
+
+    with _DATA_LOCK:
+        store = _read_store_unlocked()
+
+        if not any(
+            user["user_id"] == user_id
+            for user in store["users"]
+        ):
+            raise ValueError("사용자를 찾을 수 없습니다.")
+
+        existing = _user_measurements(store, user_id)
+        _validate_measurement_consistency(existing, payload)
+
+        assessment = calculate_health_assessment(
+            payload["height"],
+            payload["weight"],
+            payload["systolic"],
+            payload["diastolic"],
+            payload["blood_sugar"],
+        )
+
+        measurement_id = int(store["next_measurement_id"])
+
+        measurement = {
+            "id": measurement_id,
+            "user_id": user_id,
+            **payload,
+            **_assessment_for_storage(assessment),
+        }
+
+        store["measurements"].append(measurement)
+        store["next_measurement_id"] = measurement_id + 1
+        _write_store_unlocked(store)
+
+    return _serialize_measurement(measurement)
 
 
 def update_measurement(
@@ -700,192 +857,53 @@ def update_measurement(
     user_id: str,
     data: dict[str, Any],
 ) -> Optional[dict[str, Any]]:
-    """Replace one user's measurement with a complete PUT representation."""
-    measurement_date = parse_date(
-        require_text(data, "date", "측정 날짜"),
-        "측정 날짜",
-    )
+    payload = _parse_measurement_payload(data)
 
-    if measurement_date > date.today():
-        raise ValueError("미래 날짜의 측정 정보는 입력할 수 없습니다.")
+    with _DATA_LOCK:
+        store = _read_store_unlocked()
 
-    height = require_number(data, "height", "키", minimum=0.1)
-    weight = require_number(data, "weight", "몸무게", minimum=0.1)
-    systolic = require_number(
-        data,
-        "systolic",
-        "수축기 혈압",
-        integer=True,
-        minimum=1,
-    )
-    diastolic = require_number(
-        data,
-        "diastolic",
-        "이완기 혈압",
-        integer=True,
-        minimum=1,
-    )
-    blood_sugar = require_number(
-        data,
-        "blood_sugar",
-        "공복 혈당",
-        minimum=0,
-    )
-
-    if systolic <= diastolic:
-        raise ValueError("수축기 혈압은 이완기 혈압보다 커야 합니다.")
-
-    memo_value = data.get("memo")
-    if memo_value is not None and not isinstance(memo_value, str):
-        raise ValueError("메모는 문자열이어야 합니다.")
-
-    memo = memo_value.strip() or None if isinstance(memo_value, str) else None
-    previous_date = (measurement_date - timedelta(days=1)).isoformat()
-    next_date = (measurement_date + timedelta(days=1)).isoformat()
-
-    assessment = calculate_health_assessment(
-        float(height),
-        float(weight),
-        int(systolic),
-        int(diastolic),
-        float(blood_sugar),
-    )
-
-    with get_connection() as conn:
-        existing = conn.execute(
-            """
-            SELECT id
-            FROM measurements
-            WHERE id = ? AND user_id = ?
-            """,
-            (measurement_id, user_id),
-        ).fetchone()
-
-        if existing is None:
-            return None
-
-        duplicate = conn.execute(
-            """
-            SELECT 1
-            FROM measurements
-            WHERE user_id = ?
-              AND date = ?
-              AND id <> ?
-            """,
+        measurement_index = next(
             (
-                user_id,
-                measurement_date.isoformat(),
-                measurement_id,
+                index
+                for index, measurement in enumerate(
+                    store["measurements"]
+                )
+                if measurement["id"] == measurement_id
+                and measurement["user_id"] == user_id
             ),
-        ).fetchone()
-
-        if duplicate:
-            raise ValueError("해당 날짜의 다른 측정 정보가 이미 존재합니다.")
-
-        previous = conn.execute(
-            """
-            SELECT height, weight
-            FROM measurements
-            WHERE user_id = ?
-              AND date = ?
-              AND id <> ?
-            """,
-            (user_id, previous_date, measurement_id),
-        ).fetchone()
-
-        if previous is not None:
-            height_difference = abs(float(height) - previous["height"])
-            weight_difference = abs(float(weight) - previous["weight"])
-
-            if height_difference >= 3:
-                raise ValueError(
-                    f"전날 키와 {height_difference:.1f}cm 차이가 납니다. "
-                    "전날 대비 3cm 이상 차이 나는 값으로 수정할 수 없습니다."
-                )
-
-            if weight_difference >= 5:
-                raise ValueError(
-                    f"전날 몸무게와 {weight_difference:.1f}kg 차이가 납니다. "
-                    "전날 대비 5kg 이상 차이 나는 값으로 수정할 수 없습니다."
-                )
-
-        following = conn.execute(
-            """
-            SELECT height, weight
-            FROM measurements
-            WHERE user_id = ?
-              AND date = ?
-              AND id <> ?
-            """,
-            (user_id, next_date, measurement_id),
-        ).fetchone()
-
-        if following is not None:
-            height_difference = abs(following["height"] - float(height))
-            weight_difference = abs(following["weight"] - float(weight))
-
-            if height_difference >= 3:
-                raise ValueError(
-                    f"다음 날 키와 {height_difference:.1f}cm 차이가 납니다. "
-                    "다음 날 기록과 3cm 이상 차이 나는 값으로 수정할 수 없습니다."
-                )
-
-            if weight_difference >= 5:
-                raise ValueError(
-                    f"다음 날 몸무게와 {weight_difference:.1f}kg 차이가 납니다. "
-                    "다음 날 기록과 5kg 이상 차이 나는 값으로 수정할 수 없습니다."
-                )
-
-        cursor = conn.execute(
-            """
-            UPDATE measurements
-            SET
-                date = ?,
-                height = ?,
-                weight = ?,
-                systolic = ?,
-                diastolic = ?,
-                blood_sugar = ?,
-                bmi = ?,
-                bmi_category = ?,
-                bmi_status = ?,
-                blood_pressure_category = ?,
-                blood_pressure_status = ?,
-                fasting_glucose_category = ?,
-                fasting_glucose_status = ?,
-                overall_category = ?,
-                overall_status = ?,
-                warning_message = ?,
-                memo = ?
-            WHERE id = ? AND user_id = ?
-            """,
-            (
-                measurement_date.isoformat(),
-                height,
-                weight,
-                systolic,
-                diastolic,
-                blood_sugar,
-                assessment["bmi"],
-                assessment["bmi_category"],
-                assessment["bmi_status"],
-                assessment["blood_pressure_category"],
-                assessment["blood_pressure_status"],
-                assessment["fasting_glucose_category"],
-                assessment["fasting_glucose_status"],
-                assessment["overall_category"],
-                assessment["overall_status"],
-                assessment["warning_message"],
-                memo,
-                measurement_id,
-                user_id,
-            ),
+            None,
         )
 
-        if cursor.rowcount != 1:
+        if measurement_index is None:
             return None
 
-    return get_measurement(measurement_id)
+        existing = _user_measurements(
+            store,
+            user_id,
+            exclude_measurement_id=measurement_id,
+        )
+        _validate_measurement_consistency(existing, payload)
+
+        assessment = calculate_health_assessment(
+            payload["height"],
+            payload["weight"],
+            payload["systolic"],
+            payload["diastolic"],
+            payload["blood_sugar"],
+        )
+
+        updated = {
+            "id": measurement_id,
+            "user_id": user_id,
+            **payload,
+            **_assessment_for_storage(assessment),
+        }
+
+        store["measurements"][measurement_index] = updated
+        _write_store_unlocked(store)
+
+    return _serialize_measurement(updated)
+
 
 def _normalize_optional_date(
     value: Optional[str],
@@ -920,7 +938,9 @@ def _normalize_date_range(
         and normalized_end is not None
         and normalized_start > normalized_end
     ):
-        raise ValueError("조회 시작일은 종료일보다 늦을 수 없습니다.")
+        raise ValueError(
+            "조회 시작일은 종료일보다 늦을 수 없습니다."
+        )
 
     return normalized_start, normalized_end
 
@@ -933,34 +953,44 @@ def _normalize_pagination(
         normalized_page = int(page)
         normalized_page_size = int(page_size)
     except (TypeError, ValueError) as exc:
-        raise ValueError("페이지 번호와 페이지 크기는 정수여야 합니다.") from exc
+        raise ValueError(
+            "페이지 번호와 페이지 크기는 정수여야 합니다."
+        ) from exc
 
     if normalized_page < 1:
         raise ValueError("페이지 번호는 1 이상이어야 합니다.")
 
     if normalized_page_size < 1 or normalized_page_size > 50:
-        raise ValueError("페이지 크기는 1 이상 50 이하여야 합니다.")
+        raise ValueError(
+            "페이지 크기는 1 이상 50 이하여야 합니다."
+        )
 
     return normalized_page, normalized_page_size
 
 
-def _measurement_filter_sql(
+def _filtered_measurements(
+    store: dict[str, Any],
     user_id: str,
     start_date: Optional[str],
     end_date: Optional[str],
-) -> tuple[str, list[Any]]:
-    conditions = ["user_id = ?"]
-    parameters: list[Any] = [user_id]
+) -> list[dict[str, Any]]:
+    result = []
 
-    if start_date is not None:
-        conditions.append("date >= ?")
-        parameters.append(start_date)
+    for measurement in store["measurements"]:
+        if measurement["user_id"] != user_id:
+            continue
+        if start_date is not None and measurement["date"] < start_date:
+            continue
+        if end_date is not None and measurement["date"] > end_date:
+            continue
 
-    if end_date is not None:
-        conditions.append("date <= ?")
-        parameters.append(end_date)
+        result.append(measurement)
 
-    return " AND ".join(conditions), parameters
+    result.sort(
+        key=lambda item: (item["date"], int(item["id"])),
+        reverse=True,
+    )
+    return result
 
 
 def search_user_measurements(
@@ -979,56 +1009,36 @@ def search_user_measurements(
         page,
         page_size,
     )
-    where_sql, parameters = _measurement_filter_sql(
+
+    store = _load_store()
+    filtered = _filtered_measurements(
+        store,
         user_id,
         normalized_start,
         normalized_end,
     )
 
-    with get_connection() as conn:
-        count_row = conn.execute(
-            f"""
-            SELECT COUNT(*) AS total_count
-            FROM measurements
-            WHERE {where_sql}
-            """,
-            parameters,
-        ).fetchone()
+    total_count = len(filtered)
+    total_pages = (
+        math.ceil(total_count / normalized_page_size)
+        if total_count > 0
+        else 0
+    )
 
-        total_count = int(count_row["total_count"])
-        total_pages = (
-            math.ceil(total_count / normalized_page_size)
-            if total_count > 0
-            else 0
-        )
+    effective_page = normalized_page
 
-        # 필터 결과가 줄어든 뒤 존재하지 않는 페이지를 요청하면
-        # 마지막 페이지로 보정한다.
-        effective_page = normalized_page
-        if total_pages > 0 and effective_page > total_pages:
-            effective_page = total_pages
+    if total_pages > 0 and effective_page > total_pages:
+        effective_page = total_pages
 
-        offset = (effective_page - 1) * normalized_page_size
-
-        rows = conn.execute(
-            f"""
-            SELECT *
-            FROM measurements
-            WHERE {where_sql}
-            ORDER BY date DESC, id DESC
-            LIMIT ? OFFSET ?
-            """,
-            [
-                *parameters,
-                normalized_page_size,
-                offset,
-            ],
-        ).fetchall()
+    offset = (effective_page - 1) * normalized_page_size
+    page_items = filtered[
+        offset:offset + normalized_page_size
+    ]
 
     return {
         "measurements": [
-            _serialize_measurement(row)
-            for row in rows
+            _serialize_measurement(measurement)
+            for measurement in page_items
         ],
         "pagination": {
             "page": effective_page,
@@ -1036,7 +1046,10 @@ def search_user_measurements(
             "total_count": total_count,
             "total_pages": total_pages,
             "has_previous": effective_page > 1,
-            "has_next": total_pages > 0 and effective_page < total_pages,
+            "has_next": (
+                total_pages > 0
+                and effective_page < total_pages
+            ),
         },
         "filters": {
             "start_date": normalized_start,
@@ -1045,32 +1058,36 @@ def search_user_measurements(
     }
 
 
-def list_user_measurements(user_id: str) -> list[dict[str, Any]]:
-    """이전 내부 호출과의 호환을 위한 전체 목록 조회 함수."""
-    result = search_user_measurements(
-        user_id,
-        page=1,
-        page_size=50,
-    )
-    measurements = list(result["measurements"])
-    total_pages = int(result["pagination"]["total_pages"])
+def list_user_measurements(
+    user_id: str,
+) -> list[dict[str, Any]]:
+    store = _load_store()
 
-    for page_number in range(2, total_pages + 1):
-        page_result = search_user_measurements(
+    return [
+        _serialize_measurement(measurement)
+        for measurement in _filtered_measurements(
+            store,
             user_id,
-            page=page_number,
-            page_size=50,
+            None,
+            None,
         )
-        measurements.extend(page_result["measurements"])
-
-    return measurements
+    ]
 
 
-def _rounded_average(value: Any) -> Optional[float]:
-    if value is None:
+def _average(
+    measurements: list[dict[str, Any]],
+    field_name: str,
+) -> Optional[float]:
+    values = [
+        float(measurement[field_name])
+        for measurement in measurements
+        if measurement.get(field_name) is not None
+    ]
+
+    if not values:
         return None
 
-    return round(float(value), 1)
+    return round(sum(values) / len(values), 1)
 
 
 def get_measurement_statistics(
@@ -1083,59 +1100,55 @@ def get_measurement_statistics(
         start_date,
         end_date,
     )
-    where_sql, parameters = _measurement_filter_sql(
+
+    store = _load_store()
+    measurements = _filtered_measurements(
+        store,
         user_id,
         normalized_start,
         normalized_end,
     )
 
-    with get_connection() as conn:
-        row = conn.execute(
-            f"""
-            SELECT
-                COUNT(*) AS measurement_count,
-                MIN(date) AS first_date,
-                MAX(date) AS last_date,
-                AVG(height) AS average_height,
-                AVG(weight) AS average_weight,
-                AVG(bmi) AS average_bmi,
-                AVG(systolic) AS average_systolic,
-                AVG(diastolic) AS average_diastolic,
-                AVG(blood_sugar) AS average_blood_sugar
-            FROM measurements
-            WHERE {where_sql}
-            """,
-            parameters,
-        ).fetchone()
-
-    measurement_count = int(row["measurement_count"])
-
     averages = {
-        "height": _rounded_average(row["average_height"]),
-        "weight": _rounded_average(row["average_weight"]),
-        "bmi": _rounded_average(row["average_bmi"]),
-        "systolic": _rounded_average(row["average_systolic"]),
-        "diastolic": _rounded_average(row["average_diastolic"]),
-        "blood_sugar": _rounded_average(row["average_blood_sugar"]),
+        "height": _average(measurements, "height"),
+        "weight": _average(measurements, "weight"),
+        "bmi": _average(measurements, "bmi"),
+        "systolic": _average(measurements, "systolic"),
+        "diastolic": _average(measurements, "diastolic"),
+        "blood_sugar": _average(
+            measurements,
+            "blood_sugar",
+        ),
     }
 
-    bmi_category, bmi_status = classify_bmi(averages["bmi"])
-    pressure_category, pressure_status = classify_blood_pressure(
-        round(averages["systolic"])
-        if averages["systolic"] is not None
-        else None,
-        round(averages["diastolic"])
-        if averages["diastolic"] is not None
-        else None,
+    bmi_category, bmi_status = classify_bmi(
+        averages["bmi"]
     )
-    glucose_category, glucose_status = classify_fasting_glucose(
-        averages["blood_sugar"]
+    pressure_category, pressure_status = (
+        classify_blood_pressure(
+            round(averages["systolic"])
+            if averages["systolic"] is not None
+            else None,
+            round(averages["diastolic"])
+            if averages["diastolic"] is not None
+            else None,
+        )
+    )
+    glucose_category, glucose_status = (
+        classify_fasting_glucose(
+            averages["blood_sugar"]
+        )
     )
 
+    dates = [
+        measurement["date"]
+        for measurement in measurements
+    ]
+
     return {
-        "measurement_count": measurement_count,
-        "first_date": row["first_date"],
-        "last_date": row["last_date"],
+        "measurement_count": len(measurements),
+        "first_date": min(dates) if dates else None,
+        "last_date": max(dates) if dates else None,
         "filters": {
             "start_date": normalized_start,
             "end_date": normalized_end,
@@ -1158,73 +1171,101 @@ def get_measurement_statistics(
     }
 
 
+def get_measurement(
+    measurement_id: int,
+) -> Optional[dict[str, Any]]:
+    store = _load_store()
 
-def get_measurement(measurement_id: int) -> Optional[dict[str, Any]]:
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM measurements WHERE id = ?",
-            (measurement_id,),
-        ).fetchone()
+    measurement = next(
+        (
+            item
+            for item in store["measurements"]
+            if int(item["id"]) == int(measurement_id)
+        ),
+        None,
+    )
 
-    return _serialize_measurement(row) if row is not None else None
+    return (
+        _serialize_measurement(measurement)
+        if measurement is not None
+        else None
+    )
 
 
 def delete_measurement(measurement_id: int) -> bool:
-    with get_connection() as conn:
-        cursor = conn.execute(
-            "DELETE FROM measurements WHERE id = ?",
-            (measurement_id,),
-        )
+    with _DATA_LOCK:
+        store = _read_store_unlocked()
 
-    return cursor.rowcount == 1
+        original_count = len(store["measurements"])
+        store["measurements"] = [
+            measurement
+            for measurement in store["measurements"]
+            if int(measurement["id"]) != int(measurement_id)
+        ]
+
+        deleted = len(store["measurements"]) != original_count
+
+        if deleted:
+            _write_store_unlocked(store)
+
+        return deleted
 
 
 def list_users(keyword: str = "") -> list[dict[str, Any]]:
-    keyword = keyword.strip()
+    normalized_keyword = keyword.strip().lower()
+    store = _load_store()
 
-    where_clause = ""
-    params: tuple[Any, ...] = ()
+    users = []
 
-    if keyword:
-        where_clause = "WHERE u.user_id LIKE ? OR u.name LIKE ?"
-        params = (f"%{keyword}%", f"%{keyword}%")
+    for user in store["users"]:
+        if normalized_keyword and (
+            normalized_keyword not in user["user_id"].lower()
+            and normalized_keyword not in user["name"].lower()
+        ):
+            continue
 
-    with get_connection() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT
-                u.user_id,
-                u.name,
-                u.birth,
-                COUNT(m.id) AS measurement_count,
-                SUM(
-                    CASE
-                        WHEN m.overall_status = 'red' THEN 1
-                        ELSE 0
-                    END
-                ) AS risk_count
-            FROM users AS u
-            LEFT JOIN measurements AS m
-                ON u.user_id = m.user_id
-            {where_clause}
-            GROUP BY u.user_id, u.name, u.birth
-            ORDER BY u.user_id
-            """,
-            params,
-        ).fetchall()
+        measurements = [
+            measurement
+            for measurement in store["measurements"]
+            if measurement["user_id"] == user["user_id"]
+        ]
 
-    return [dict(row) for row in rows]
+        users.append(
+            {
+                "user_id": user["user_id"],
+                "name": user["name"],
+                "birth": user["birth"],
+                "measurement_count": len(measurements),
+                "risk_count": sum(
+                    1
+                    for measurement in measurements
+                    if measurement.get("overall_status")
+                    == STATUS_RED
+                ),
+            }
+        )
+
+    users.sort(key=lambda item: item["user_id"])
+    return users
 
 
 def get_user(user_id: str) -> Optional[dict[str, Any]]:
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT user_id, name, birth
-            FROM users
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
+    store = _load_store()
 
-    return dict(row) if row is not None else None
+    user = next(
+        (
+            item
+            for item in store["users"]
+            if item["user_id"] == user_id
+        ),
+        None,
+    )
+
+    if user is None:
+        return None
+
+    return {
+        "user_id": user["user_id"],
+        "name": user["name"],
+        "birth": user["birth"],
+    }
