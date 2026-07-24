@@ -283,3 +283,25 @@ HEALTH_DATA_PATH=/data/data.json
 ```
 
 POST·PUT·DELETE 요청이 성공할 때마다 변경된 전체 데이터가 임시 JSON 파일에 기록된 후 원본 `data.json`으로 교체됩니다. GET·날짜 검색·페이지네이션·평균 API는 해당 JSON 파일을 읽어 처리합니다.
+
+
+## 측정값 추가 검증
+
+`POST /api/measurements`와 `PUT /api/measurements/{measurement_id}`는 다음 상한을 적용합니다.
+
+```text
+height < 300
+weight < 200
+```
+
+경계값인 `300cm`, `200kg`도 허용하지 않습니다.
+
+오류 예시:
+
+```json
+{
+  "success": false,
+  "message": "키는 300cm 미만으로 입력해 주세요. 정상적이지 않은 값입니다.",
+  "error_type": "validation"
+}
+```

@@ -1044,3 +1044,17 @@ td {
     flex-direction: column;
   }
 }
+
+
+/* 비정상적인 키·몸무게 상한 입력 경고 */
+.measurement-form input.invalid-measurement-value {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  box-shadow: 0 0 0 3px rgba(201, 71, 71, 0.14);
+}
+
+.measurement-form input.invalid-measurement-value:focus {
+  border-color: var(--danger);
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(201, 71, 71, 0.18);
+}

@@ -697,6 +697,19 @@ def _parse_measurement_payload(
         "몸무게",
         minimum=0.1,
     )
+
+    if height >= 300:
+        raise ValueError(
+            "키는 300cm 미만으로 입력해 주세요. "
+            "정상적이지 않은 값입니다."
+        )
+
+    if weight >= 200:
+        raise ValueError(
+            "몸무게는 200kg 미만으로 입력해 주세요. "
+            "정상적이지 않은 값입니다."
+        )
+
     systolic = require_number(
         data,
         "systolic",

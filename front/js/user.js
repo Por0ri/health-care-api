@@ -6,6 +6,18 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   const PAGE_SIZE = 5;
+  const PHYSICAL_VALUE_LIMITS = {
+    height: {
+      exclusiveMaximum: 300,
+      label: "키",
+      unit: "cm"
+    },
+    weight: {
+      exclusiveMaximum: 200,
+      label: "몸무게",
+      unit: "kg"
+    }
+  };
 
   const state = {
     currentPage: 1,
@@ -52,6 +64,9 @@ document.addEventListener("DOMContentLoaded", () => {
   editDateInput.max = today;
   startDateInput.max = today;
   endDateInput.max = today;
+
+  attachPhysicalValueValidation(form);
+  attachPhysicalValueValidation(editForm);
 
   document
     .querySelector("#logout-button")
@@ -107,6 +122,10 @@ document.addEventListener("DOMContentLoaded", () => {
     event.preventDefault();
     hideMessage(messageElement);
 
+    if (!validatePhysicalValueForm(form)) {
+      return;
+    }
+
     const formData = new FormData(form);
 
     try {
@@ -137,6 +156,10 @@ document.addEventListener("DOMContentLoaded", () => {
     event.preventDefault();
     hideMessage(messageElement);
 
+    if (!validatePhysicalValueForm(editForm)) {
+      return;
+    }
+
     const formData = new FormData(editForm);
     const measurementId = formData.get("measurement_id");
 
@@ -165,6 +188,97 @@ document.addEventListener("DOMContentLoaded", () => {
       handleApiError(error);
     }
   });
+
+  function attachPhysicalValueValidation(targetForm) {
+    Object.entries(PHYSICAL_VALUE_LIMITS).forEach(
+      ([fieldName, rule]) => {
+        const input = targetForm.elements.namedItem(fieldName);
+
+        if (!(input instanceof HTMLInputElement)) {
+          return;
+        }
+
+        input.addEventListener("input", () => {
+          clearPhysicalValueWarning(input);
+        });
+
+        input.addEventListener("blur", () => {
+          validatePhysicalValue(input, rule, true);
+        });
+      }
+    );
+  }
+
+  function validatePhysicalValueForm(targetForm) {
+    for (const [fieldName, rule] of Object.entries(
+      PHYSICAL_VALUE_LIMITS
+    )) {
+      const input = targetForm.elements.namedItem(fieldName);
+
+      if (
+        input instanceof HTMLInputElement
+        && !validatePhysicalValue(input, rule, true)
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function validatePhysicalValue(input, rule, restoreFocus) {
+    const rawValue = input.value.trim();
+
+    if (!rawValue) {
+      clearPhysicalValueWarning(input);
+      return true;
+    }
+
+    const value = Number(rawValue);
+
+    if (
+      Number.isFinite(value)
+      && value < rule.exclusiveMaximum
+    ) {
+      clearPhysicalValueWarning(input);
+      return true;
+    }
+
+    const message =
+      `${rule.label}는 ${rule.exclusiveMaximum}${rule.unit} ` +
+      "미만으로 입력해 주세요. 정상적이지 않은 값입니다.";
+
+    input.setCustomValidity(message);
+    input.classList.add("invalid-measurement-value");
+    input.setAttribute("aria-invalid", "true");
+
+    showMessage(messageElement, message, "warning");
+    input.reportValidity();
+
+    if (restoreFocus) {
+      window.setTimeout(() => {
+        input.focus();
+        input.select();
+      }, 0);
+    }
+
+    return false;
+  }
+
+  function clearPhysicalValueWarning(input) {
+    input.setCustomValidity("");
+    input.classList.remove("invalid-measurement-value");
+    input.removeAttribute("aria-invalid");
+
+    if (
+      messageElement.classList.contains("warning")
+      && messageElement.textContent.includes(
+        "정상적이지 않은 값입니다."
+      )
+    ) {
+      hideMessage(messageElement);
+    }
+  }
 
   function applyDateFilter() {
     const startDate = startDateInput.value;

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>사용자 건강 기록</title>
-  <link rel="stylesheet" href="/css/styles.css?v=7">
-  <script defer src="/js/api.js?v=7"></script>
-  <script defer src="/js/user.js?v=7"></script>
+  <link rel="stylesheet" href="/css/styles.css?v=8">
+  <script defer src="/js/api.js?v=8"></script>
+  <script defer src="/js/user.js?v=8"></script>
 </head>
 <body>
   <header class="topbar">
@@ -46,11 +46,11 @@
           </label>
           <label>
             키(cm)
-            <input name="height" type="number" min="0.1" step="0.1" required>
+            <input name="height" type="number" min="0.1" max="299.9" step="0.1" inputmode="decimal" required>
           </label>
           <label>
             몸무게(kg)
-            <input name="weight" type="number" min="0.1" step="0.1" required>
+            <input name="weight" type="number" min="0.1" max="199.9" step="0.1" inputmode="decimal" required>
           </label>
           <label>
             수축기 혈압
@@ -206,11 +206,11 @@
       </label>
       <label>
         키(cm)
-        <input id="edit-height" name="height" type="number" min="0.1" step="0.1" required>
+        <input id="edit-height" name="height" type="number" min="0.1" max="299.9" step="0.1" inputmode="decimal" required>
       </label>
       <label>
         몸무게(kg)
-        <input id="edit-weight" name="weight" type="number" min="0.1" step="0.1" required>
+        <input id="edit-weight" name="weight" type="number" min="0.1" max="199.9" step="0.1" inputmode="decimal" required>
       </label>
       <label>
         수축기 혈압
